@@ -28,3 +28,18 @@ The project treats each paper as an executable research unit:
 
 Paper 001 starts the program with a taxonomy for intraday NIFTY market states.
 
+## Quick Commands
+
+Run EXP-001 on a canonical intraday CSV:
+
+```powershell
+py -m aadithya_quantlab.experiments.run_exp001 --input data/raw/nifty_intraday.csv --output validation/reports/EXP-001_real_nifty_report.md --labeled-output validation/reports/EXP-001_real_nifty_labeled.csv
+```
+
+Record a Zerodha-shaped paper order:
+
+```powershell
+py -m aadithya_quantlab.trading.run_paper_order --symbol NIFTY26JUL24000CE --side BUY --qty 75
+```
+
+Paper-order commands write to a local ledger only; they do not place live broker orders.

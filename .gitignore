@@ -16,6 +16,7 @@ validation/reports/*.html
 validation/reports/*.pdf
 experiments/runs/
 work/
+paper_trades/
 
 # Local system files
 .DS_Store
