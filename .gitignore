@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Research outputs
+data/raw/
+data/interim/
+data/processed/
+validation/reports/*.html
+validation/reports/*.pdf
+experiments/runs/
+
+# Local system files
+.DS_Store
+Thumbs.db
+
