@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from aadithya_quantlab.research.market_state_taxonomy import LabelerConfig, label_market_states
+from aadithya_quantlab.validation.leakage import check_replay_safe_intraday_bars
 from aadithya_quantlab.validation.market_state_reports import (
     MarketStateReport,
     build_market_state_report,
@@ -28,7 +29,7 @@ def run_exp001(
 ) -> Exp001Result:
     """Run Paper 001 baseline labeling and diagnostics."""
 
+    check_replay_safe_intraday_bars(bars).raise_for_errors()
     labeled = label_market_states(bars, config)
     report = build_market_state_report(labeled, forward_horizons)
     return Exp001Result(labeled_bars=labeled, report=report)
-

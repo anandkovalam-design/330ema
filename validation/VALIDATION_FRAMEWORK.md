@@ -16,6 +16,8 @@ The validation framework checks whether research claims survive historical repla
 The first validation layer for Paper 001 is implemented by:
 
 - `aadithya_quantlab.experiments.exp001_baseline_labeler.run_exp001`
+- `aadithya_quantlab.data.contracts.validate_intraday_ohlcv_schema`
+- `aadithya_quantlab.validation.leakage.check_replay_safe_intraday_bars`
 - `aadithya_quantlab.validation.market_state_reports.build_market_state_report`
 
 Required report tables:

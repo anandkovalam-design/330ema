@@ -15,6 +15,7 @@ data/processed/
 validation/reports/*.html
 validation/reports/*.pdf
 experiments/runs/
+work/
 
 # Local system files
 .DS_Store
