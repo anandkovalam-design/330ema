@@ -39,7 +39,7 @@ py -m aadithya_quantlab.experiments.run_exp001 --input data/raw/nifty_intraday.c
 Record a Zerodha-shaped paper order:
 
 ```powershell
-py -m aadithya_quantlab.trading.run_paper_order --symbol NIFTY26JUL24000CE --side BUY --qty 75
+py -m aadithya_quantlab.trading.run_paper_order --symbol NIFTY26JUL24000CE --side BUY --qty 65
 ```
 
-Paper-order commands write to a local ledger only; they do not place live broker orders.
+Paper-order commands write to a local ledger only; they do not place live broker orders. NIFTY paper orders are currently locked to quantity `65`.

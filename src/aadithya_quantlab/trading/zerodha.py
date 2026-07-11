@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 from aadithya_quantlab.trading.paper import PaperOrder
 
+NIFTY_PAPER_QUANTITY = 65
+
 
 @dataclass(frozen=True)
 class ZerodhaConfig:
@@ -47,8 +49,8 @@ def build_nifty_option_paper_order(
     transaction = transaction_type.upper()
     if transaction not in {"BUY", "SELL"}:
         raise ValueError("transaction_type must be BUY or SELL.")
-    if quantity <= 0:
-        raise ValueError("quantity must be positive.")
+    if quantity != NIFTY_PAPER_QUANTITY:
+        raise ValueError(f"NIFTY paper orders must use quantity {NIFTY_PAPER_QUANTITY}.")
     return PaperOrder(
         tradingsymbol=tradingsymbol,
         exchange="NFO",
@@ -59,4 +61,3 @@ def build_nifty_option_paper_order(
         validity="DAY",
         price=price,
     )
-

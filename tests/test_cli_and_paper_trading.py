@@ -5,6 +5,7 @@ from aadithya_quantlab.experiments.run_exp001 import main as run_exp001_main
 from aadithya_quantlab.trading.paper import PaperLedger
 from aadithya_quantlab.trading.run_paper_order import main as run_paper_order_main
 from aadithya_quantlab.trading.zerodha import (
+    NIFTY_PAPER_QUANTITY,
     build_kite_login_url,
     build_nifty_option_paper_order,
 )
@@ -37,7 +38,7 @@ def test_exp001_cli_writes_report_and_labeled_csv(tmp_path: Path) -> None:
 
 def test_paper_ledger_records_order(tmp_path: Path) -> None:
     ledger_path = tmp_path / "paper_orders.csv"
-    order = build_nifty_option_paper_order("NIFTY26JUL24000CE", "BUY", 75)
+    order = build_nifty_option_paper_order("NIFTY26JUL24000CE", "BUY", NIFTY_PAPER_QUANTITY)
 
     record = PaperLedger(ledger_path).record_order(order)
     orders = PaperLedger(ledger_path).read_orders()
@@ -56,7 +57,7 @@ def test_paper_order_cli_writes_ledger(tmp_path: Path) -> None:
             "--side",
             "BUY",
             "--qty",
-            "75",
+            str(NIFTY_PAPER_QUANTITY),
             "--ledger",
             str(ledger_path),
         ]
@@ -66,6 +67,14 @@ def test_paper_order_cli_writes_ledger(tmp_path: Path) -> None:
     assert ledger_path.exists()
 
 
+def test_nifty_paper_order_rejects_wrong_quantity() -> None:
+    try:
+        build_nifty_option_paper_order("NIFTY26JUL24000CE", "BUY", 75)
+    except ValueError as error:
+        assert "quantity 65" in str(error)
+        return
+    raise AssertionError("Expected NIFTY paper order quantity guard to reject 75.")
+
+
 def test_build_kite_login_url() -> None:
     assert build_kite_login_url("abc123") == "https://kite.zerodha.com/connect/login?api_key=abc123&v=3"
-

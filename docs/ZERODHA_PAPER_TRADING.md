@@ -38,9 +38,11 @@ This writes a CSV row only. It does not call Zerodha order placement.
 py -m aadithya_quantlab.trading.run_paper_order `
   --symbol NIFTY26JUL24000CE `
   --side BUY `
-  --qty 75 `
+  --qty 65 `
   --ledger paper_trades/paper_orders.csv
 ```
+
+NIFTY paper orders are locked to quantity `65`. The CLI rejects any other quantity.
 
 ## Live Trading Guardrail
 
@@ -53,4 +55,3 @@ No module in this repository places live orders. When live execution is eventual
 - manual confirmation mode
 - append-only audit log
 - dry-run test parity
-
