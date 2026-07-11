@@ -2,7 +2,8 @@
 
 Status: Draft protocol  
 Source paper: Paper 001  
-Code entry point: `aadithya_quantlab.research.market_state_taxonomy.label_market_states`
+Labeler entry point: `aadithya_quantlab.research.market_state_taxonomy.label_market_states`  
+Experiment entry point: `aadithya_quantlab.experiments.exp001_baseline_labeler.run_exp001`
 
 ## Objective
 
@@ -35,7 +36,18 @@ Produce reproducible intraday NIFTY market-state labels from canonical OHLCV bar
 - State transition matrix.
 - Median state duration.
 - Count and percentage of bars per state.
+- Forward return summary by state and horizon.
 - Leakage audit result.
+
+## Report Tables
+
+`run_exp001` returns:
+
+- `labeled_bars` with feature columns, `state_id`, `state_name`, `state_confidence`, `reason_codes`, and `labeler_version`.
+- `state_counts`, showing bar count and percentage by state.
+- `transition_matrix`, row-normalized from-state to next-state probabilities.
+- `duration_summary`, showing segment count, median bars, mean bars, and max bars by state.
+- `forward_return_summary`, showing forward return distributions by state and horizon.
 
 ## Acceptance Gate
 

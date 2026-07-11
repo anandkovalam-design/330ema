@@ -89,8 +89,6 @@ def compute_market_state_features(
 
     output["bar_index"] = output.groupby(["symbol", "session_date"], sort=False).cumcount()
     output["typical_price"] = (output["high"] + output["low"] + output["close"]) / 3.0
-    grouped = output.groupby(["symbol", "session_date"], sort=False, group_keys=False)
-
     def add_session_features(session: pd.DataFrame) -> pd.DataFrame:
         session = session.copy()
         opening_rows = session.iloc[: config.opening_window_bars]
@@ -169,7 +167,11 @@ def compute_market_state_features(
         session["failed_breakout_down"] = previous_outside_down & current_inside
         return session
 
-    return grouped.apply(add_session_features).reset_index(drop=True)
+    session_frames = [
+        add_session_features(session)
+        for _, session in output.groupby(["symbol", "session_date"], sort=False)
+    ]
+    return pd.concat(session_frames, ignore_index=True)
 
 
 def label_market_states(
