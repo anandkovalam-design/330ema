@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,13 @@ import pandas as pd
 
 from aadithya_quantlab.data.contracts import normalize_intraday_ohlcv, validate_intraday_ohlcv_schema
 from aadithya_quantlab.trading.zerodha import build_kite_login_url
+
+
+DEFAULT_ACCESS_TOKEN_FILE = Path("outputs/zerodha/access_token.txt")
+
+
+class NoHistoricalCandlesError(ValueError):
+    """Raised when the broker returns no historical candles for a query."""
 
 
 def _get_required_env(name: str) -> str:
@@ -25,6 +32,38 @@ def _mask_secret(value: str) -> str:
     if len(value) <= 8:
         return "*" * len(value)
     return f"{value[:4]}...{value[-4:]}"
+
+
+def latest_weekday_session_hint(reference: datetime | None = None) -> str:
+    current = reference or datetime.now(UTC)
+    session_day = current.date()
+    while session_day.weekday() >= 5:
+        session_day -= timedelta(days=1)
+    return f"Try {session_day.isoformat()} 09:15 to 15:30 IST for an active weekday session."
+
+
+def load_access_token(
+    *,
+    env_var: str = "ZERODHA_ACCESS_TOKEN",
+    fallback_path: str | Path = DEFAULT_ACCESS_TOKEN_FILE,
+) -> str:
+    token = os.getenv(env_var, "").strip()
+    if token:
+        return token
+
+    path = Path(fallback_path)
+    if path.exists():
+        file_token = path.read_text(encoding="utf-8").strip()
+        if file_token:
+            return file_token
+
+    raise ValueError(
+        f"Set {env_var} or provide a non-empty token file at {path}."
+    )
+
+
+def access_token_preview(token: str) -> str:
+    return _mask_secret(token)
 
 
 def _load_kite_connect_class() -> Any:
@@ -106,7 +145,7 @@ def generate_access_token_from_env(token_output_path: str | Path) -> AccessToken
 
 def build_safe_kite_client_from_env() -> SafeKiteClient:
     api_key = _get_required_env("ZERODHA_API_KEY")
-    access_token = _get_required_env("ZERODHA_ACCESS_TOKEN")
+    access_token = load_access_token()
 
     kite_connect_class = _load_kite_connect_class()
     kite = kite_connect_class(api_key=api_key)
@@ -146,7 +185,10 @@ def fetch_historical_to_canonical_csv(
 
     bars = pd.DataFrame(rows)
     if bars.empty:
-        raise ValueError("No historical candles returned for the requested range.")
+        hint = latest_weekday_session_hint()
+        raise NoHistoricalCandlesError(
+            f"No historical candles returned for {symbol} ({interval}). {hint}"
+        )
 
     bars = bars.rename(columns={"date": "timestamp"})
     bars["symbol"] = symbol.strip()

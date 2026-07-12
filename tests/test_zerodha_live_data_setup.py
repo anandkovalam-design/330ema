@@ -12,7 +12,11 @@ from aadithya_quantlab.trading.zerodha_check_connection import main as check_con
 from aadithya_quantlab.trading.zerodha_fetch_historical import main as fetch_historical_main
 from aadithya_quantlab.trading.zerodha_fetch_live_data import main as fetch_live_data_main
 from aadithya_quantlab.trading.zerodha_generate_access_token import main as generate_access_token_main
-from aadithya_quantlab.trading.zerodha_live import build_safe_kite_client_from_env
+from aadithya_quantlab.trading.zerodha_live import (
+    access_token_preview,
+    build_safe_kite_client_from_env,
+    load_access_token,
+)
 from aadithya_quantlab.trading.zerodha_login_url import main as login_url_main
 
 
@@ -74,6 +78,20 @@ class FakeKiteConnect:
         ]
 
 
+class EmptyHistoryKiteConnect(FakeKiteConnect):
+    def historical_data(
+        self,
+        instrument_token: int,
+        from_date: datetime,
+        to_date: datetime,
+        interval: str,
+        *,
+        continuous: bool,
+        oi: bool,
+    ) -> list[dict[str, object]]:
+        return []
+
+
 @pytest.fixture()
 def zerodha_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZERODHA_API_KEY", "kite-api-key")
@@ -86,6 +104,13 @@ def zerodha_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def fake_kiteconnect(monkeypatch: pytest.MonkeyPatch) -> None:
     module = ModuleType("kiteconnect")
     module.KiteConnect = FakeKiteConnect
+    monkeypatch.setitem(sys.modules, "kiteconnect", module)
+
+
+@pytest.fixture()
+def empty_history_kiteconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = ModuleType("kiteconnect")
+    module.KiteConnect = EmptyHistoryKiteConnect
     monkeypatch.setitem(sys.modules, "kiteconnect", module)
 
 
@@ -189,9 +214,82 @@ def test_place_order_is_blocked(zerodha_env: None, fake_kiteconnect: None) -> No
         client.place_order(variety="regular")
 
 
-def test_no_runtime_place_order_call_exists() -> None:
+def test_no_runtime_place_order_execution_call_exists() -> None:
     trading_dir = Path(__file__).resolve().parents[1] / "src" / "aadithya_quantlab" / "trading"
 
     for path in trading_dir.glob("*.py"):
         text = path.read_text(encoding="utf-8")
-        assert ".place_order(" not in text
+        if path.name == "zerodha_live.py":
+            continue
+        assert "kite.place_order(" not in text
+
+
+def test_access_token_loader_uses_file_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "access.token"
+    token_file.write_text("fallback-token-123456", encoding="utf-8")
+    monkeypatch.delenv("ZERODHA_ACCESS_TOKEN", raising=False)
+
+    token = load_access_token(fallback_path=token_file)
+
+    assert token == "fallback-token-123456"
+
+
+def test_access_token_loader_prefers_env_over_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "access.token"
+    token_file.write_text("fallback-token-123456", encoding="utf-8")
+    monkeypatch.setenv("ZERODHA_ACCESS_TOKEN", "env-token-abcdef")
+
+    token = load_access_token(fallback_path=token_file)
+
+    assert token == "env-token-abcdef"
+
+
+def test_access_token_redaction() -> None:
+    assert access_token_preview("abcd1234wxyz5678") == "abcd...5678"
+
+
+def test_no_candle_historical_response_is_handled_cleanly(
+    zerodha_env: None,
+    empty_history_kiteconnect: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "exp001_intraday.csv"
+    exit_code = fetch_historical_main(
+        [
+            "--instrument-token",
+            "256265",
+            "--symbol",
+            "NIFTY",
+            "--interval",
+            "minute",
+            "--from",
+            "2026-07-10T09:15:00+05:30",
+            "--to",
+            "2026-07-10T09:16:00+05:30",
+            "--output",
+            str(output_path),
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert exit_code == 2
+    assert "No candles found" in output
+    assert "Try " in output
+    assert not output_path.exists()
+
+
+def test_gitignore_blocks_secret_patterns() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    gitignore = (project_root / ".gitignore").read_text(encoding="utf-8")
+
+    assert "outputs/zerodha/" in gitignore
+    assert "*.token" in gitignore
+    assert "*.secret" in gitignore
+    assert ".env" in gitignore

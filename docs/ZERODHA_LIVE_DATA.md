@@ -32,6 +32,8 @@ The command writes the full token to the file and prints only a masked token pre
 $env:ZERODHA_ACCESS_TOKEN = (Get-Content outputs/zerodha/access_token.txt -Raw).Trim()
 ```
 
+Note: Commands now load token safely from `ZERODHA_ACCESS_TOKEN` first, and fall back to `outputs/zerodha/access_token.txt` automatically when the env var is absent.
+
 ## 5) Verify connection with kite.profile()
 
 ```powershell
@@ -58,6 +60,8 @@ py -m aadithya_quantlab.trading.zerodha_fetch_live_data --instrument "NSE:NIFTY 
 py -m aadithya_quantlab.trading.zerodha_fetch_historical --instrument-token 256265 --symbol NIFTY --interval minute --from "2026-07-10T09:15:00+05:30" --to "2026-07-10T15:30:00+05:30" --output outputs/exp001/nifty_intraday_ohlcv.csv
 ```
 
+If no candles are returned, the command exits cleanly with a friendly suggestion for a recent weekday market session.
+
 The CSV columns are written in canonical schema order:
 
 - symbol
@@ -73,6 +77,19 @@ The CSV columns are written in canonical schema order:
 
 ## Safety Guarantees
 
-- Credentials are read from environment variables only.
+- Credentials are read from environment variables, with access-token fallback to `outputs/zerodha/access_token.txt`.
 - API secret and full access token are never printed by CLI commands.
 - Live order placement is not available; `place_order` is blocked.
+
+## One-Command Safe Workflow
+
+This command runs all steps in sequence without placing orders:
+
+1. Check connection
+2. Fetch live NIFTY LTP
+3. Fetch historical NIFTY 5-minute candles
+4. Run EXP-001 report only if historical CSV exists
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_live_data_workflow --from "2026-07-10T09:15:00+05:30" --to "2026-07-10T15:30:00+05:30"
+```

@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 
-from aadithya_quantlab.trading.zerodha_live import fetch_historical_to_canonical_csv
+from aadithya_quantlab.trading.zerodha_live import (
+    NoHistoricalCandlesError,
+    fetch_historical_to_canonical_csv,
+)
 
 
 def _parse_iso_datetime(value: str) -> datetime:
@@ -31,14 +34,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    output_path = fetch_historical_to_canonical_csv(
-        instrument_token=args.instrument_token,
-        symbol=args.symbol,
-        interval=args.interval,
-        from_date=args.from_date,
-        to_date=args.to_date,
-        output_csv=args.output,
-    )
+    try:
+        output_path = fetch_historical_to_canonical_csv(
+            instrument_token=args.instrument_token,
+            symbol=args.symbol,
+            interval=args.interval,
+            from_date=args.from_date,
+            to_date=args.to_date,
+            output_csv=args.output,
+        )
+    except NoHistoricalCandlesError as error:
+        print(f"No candles found: {error}")
+        return 2
+
     print(f"Saved canonical intraday CSV: {output_path}")
     return 0
 

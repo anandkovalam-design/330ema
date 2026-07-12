@@ -17,6 +17,10 @@ validation/reports/*.pdf
 experiments/runs/
 work/
 paper_trades/
+outputs/zerodha/
+*.token
+*.secret
+.env
 
 # Local system files
 .DS_Store
