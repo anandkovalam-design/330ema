@@ -9,13 +9,16 @@ import pandas as pd
 import pytest
 
 from aadithya_quantlab.trading.zerodha_check_connection import main as check_connection_main
+from aadithya_quantlab.trading.zerodha_daily_login import main as daily_login_main
 from aadithya_quantlab.trading.zerodha_fetch_historical import main as fetch_historical_main
 from aadithya_quantlab.trading.zerodha_fetch_live_data import main as fetch_live_data_main
 from aadithya_quantlab.trading.zerodha_generate_access_token import main as generate_access_token_main
 from aadithya_quantlab.trading.zerodha_live import (
+    DailyLoginInputs,
     access_token_preview,
     build_safe_kite_client_from_env,
     load_access_token,
+    run_daily_login,
 )
 from aadithya_quantlab.trading.zerodha_login_url import main as login_url_main
 
@@ -130,6 +133,43 @@ def test_generate_access_token_cli_masks_console_output(
 ) -> None:
     token_output = tmp_path / "access_token.txt"
     exit_code = generate_access_token_main(["--token-output", str(token_output)])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert token_output.read_text(encoding="utf-8") == "abcd1234wxyz5678"
+    assert "abcd...5678" in output
+    assert "abcd1234wxyz5678" not in output
+    assert "super-secret-value" not in output
+
+
+def test_daily_login_core_saves_masked_token(
+    fake_kiteconnect: None,
+    tmp_path: Path,
+) -> None:
+    token_output = tmp_path / "daily_access_token.txt"
+
+    result = run_daily_login(
+        DailyLoginInputs(
+            api_key="kite-api-key",
+            api_secret="super-secret-value",
+            request_token="request-token-1234",
+            token_output_path=token_output,
+        )
+    )
+
+    assert token_output.read_text(encoding="utf-8") == "abcd1234wxyz5678"
+    assert result.masked_access_token == "abcd...5678"
+
+
+def test_daily_login_cli_uses_env_and_does_not_print_secret(
+    zerodha_env: None,
+    fake_kiteconnect: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    token_output = tmp_path / "daily_access_token.txt"
+
+    exit_code = daily_login_main(["--skip-url", "--token-output", str(token_output)])
     output = capsys.readouterr().out
 
     assert exit_code == 0

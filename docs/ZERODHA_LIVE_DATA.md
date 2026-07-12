@@ -9,6 +9,33 @@ $env:ZERODHA_API_KEY = "<your_api_key>"
 $env:ZERODHA_API_SECRET = "<your_api_secret>"
 ```
 
+## Daily Morning Login
+
+Use this once at the start of each trading day. It prompts for anything not already set in PowerShell, prints the login URL, exchanges the fresh request token, and saves the day access token locally.
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_daily_login
+```
+
+Typical daily flow:
+
+1. Run the command above.
+2. Paste `ZERODHA_API_KEY` if prompted.
+3. Open the printed Zerodha login URL.
+4. Copy only the `request_token` from the redirected browser URL.
+5. Paste the request token.
+6. Paste `ZERODHA_API_SECRET` when prompted. It will not be echoed.
+7. The command saves `outputs/zerodha/access_token.txt`, which is ignored by Git.
+
+After this, no more login/token setup is needed for the same day unless Zerodha expires the session.
+
+Then run:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_check_connection
+py -m aadithya_quantlab.trading.zerodha_live_data_workflow --from "2026-07-09T09:15:00+05:30" --to "2026-07-09T15:30:00+05:30"
+```
+
 ## 2) Print login URL
 
 ```powershell

@@ -78,6 +78,16 @@ class AccessTokenResult:
     masked_access_token: str
 
 
+@dataclass(frozen=True)
+class DailyLoginInputs:
+    """Inputs required for the once-per-day Zerodha login flow."""
+
+    api_key: str
+    api_secret: str
+    request_token: str
+    token_output_path: Path = DEFAULT_ACCESS_TOKEN_FILE
+
+
 class SafeKiteClient:
     """Wrapper that intentionally exposes read-only broker operations."""
 
@@ -122,9 +132,22 @@ def build_login_url_from_env() -> str:
 
 
 def generate_access_token_from_env(token_output_path: str | Path) -> AccessTokenResult:
-    api_key = _get_required_env("ZERODHA_API_KEY")
-    api_secret = _get_required_env("ZERODHA_API_SECRET")
-    request_token = _get_required_env("ZERODHA_REQUEST_TOKEN")
+    return generate_access_token(
+        api_key=_get_required_env("ZERODHA_API_KEY"),
+        api_secret=_get_required_env("ZERODHA_API_SECRET"),
+        request_token=_get_required_env("ZERODHA_REQUEST_TOKEN"),
+        token_output_path=token_output_path,
+    )
+
+
+def generate_access_token(
+    *,
+    api_key: str,
+    api_secret: str,
+    request_token: str,
+    token_output_path: str | Path,
+) -> AccessTokenResult:
+    """Exchange a fresh request token for an access token and save it locally."""
 
     kite_connect_class = _load_kite_connect_class()
     kite = kite_connect_class(api_key=api_key)
@@ -140,6 +163,17 @@ def generate_access_token_from_env(token_output_path: str | Path) -> AccessToken
     return AccessTokenResult(
         token_output_path=output_path,
         masked_access_token=_mask_secret(access_token),
+    )
+
+
+def run_daily_login(inputs: DailyLoginInputs) -> AccessTokenResult:
+    """Run the daily login token exchange without printing sensitive values."""
+
+    return generate_access_token(
+        api_key=inputs.api_key.strip(),
+        api_secret=inputs.api_secret.strip(),
+        request_token=inputs.request_token.strip(),
+        token_output_path=inputs.token_output_path,
     )
 
 

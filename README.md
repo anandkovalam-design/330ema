@@ -30,6 +30,12 @@ Paper 001 starts the program with a taxonomy for intraday NIFTY market states.
 
 ## Quick Commands
 
+Run daily Zerodha login setup once per trading day:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_daily_login
+```
+
 Run EXP-001 on a canonical intraday CSV:
 
 ```powershell
