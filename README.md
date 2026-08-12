@@ -30,16 +30,7 @@ Paper 001 starts the program with a taxonomy for intraday NIFTY market states.
 
 ## Quick Commands
 
-Launch the multi-page trading dashboard:
-
-```powershell
-streamlit run streamlit_app.py
-```
-
-The dashboard starts in safe paper mode. Its Live and Trading enabled controls
-are interface state only; this dashboard does not submit broker orders.
-
-Launch the separate green Zerodha live-trading control dashboard:
+Launch the green Zerodha live-trading control dashboard:
 
 ```powershell
 $env:PYTHONPATH="src"
@@ -82,8 +73,8 @@ execution:
 - `src/groww_engine/live_broker.py` - isolated real-order API surface.
 - `src/groww_engine/groww_client.py` - market-data adapter.
 
-The Streamlit dashboard remains separate and does not need to stay open for the
-engine to run.
+The Zerodha Streamlit dashboard remains separate and does not need to stay open
+for the engine to run.
 
 ### 1. Install dependencies
 
