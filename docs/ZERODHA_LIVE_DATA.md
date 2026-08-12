@@ -2,6 +2,24 @@
 
 This setup is intentionally live-data only. Live order placement is disabled in code.
 
+## App Mode (Recommended for Testing)
+
+Run the interactive app:
+
+```powershell
+py -m streamlit run src/aadithya_quantlab/trading/zerodha_live_data_app.py
+```
+
+In the app, run steps in order:
+
+1. Optional: If you already have today's access token, use Step 0 to apply existing token
+2. Generate login URL (Step 1)
+3. Recommended: Generate today's access token using request token + API secret (Step 2)
+4. Check connection and fetch live NIFTY LTP (Step 3)
+5. Fetch historical candles and run EXP-001 report (Step 4)
+
+All app actions are live-data only and do not place orders.
+
 ## 1) Set credentials in PowerShell
 
 ```powershell
@@ -107,6 +125,73 @@ The CSV columns are written in canonical schema order:
 - Credentials are read from environment variables, with access-token fallback to `outputs/zerodha/access_token.txt`.
 - API secret and full access token are never printed by CLI commands.
 - Live order placement is not available; `place_order` is blocked.
+- Shadow paper trading uses live LTP only and records virtual fills/exits. It does not require broker order execution.
+
+## Shadow Paper Trade Test
+
+Use this when you want to test NIFTY option trade management for a few days without placing real orders.
+
+1. Complete the daily morning login.
+2. Choose the live NIFTY option contract from Kite, for example `NFO:NIFTY26JUL24200CE`.
+3. Run the shadow tester:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_shadow_paper --instrument "NFO:NIFTY26JUL24200CE" --side CALL --quantity 65 --poll-seconds 30
+```
+
+The first tick opens a virtual paper position at live LTP. The runner then watches the same instrument and applies:
+
+- 10% premium stop loss
+- target of 25 premium points
+- trailing stop after 10 premium points profit
+- quantity 65 by default
+
+If the terminal closes, the open paper position is saved in `outputs/zerodha/shadow_paper_position.json`. Running the same command again resumes it. Closed trades are written to `outputs/zerodha/shadow_paper_trades.csv`.
+
+### Automatic ATM Start After Broker Login
+
+Once the daily Zerodha login is complete, this command waits until 09:15 IST if needed, auto-selects the nearest-expiry ATM NIFTY call option, and starts shadow paper tracking:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_shadow_paper --side CALL --auto-nifty-atm --wait-for-market-open --quantity 65 --poll-seconds 30 --reset
+```
+
+For ATM put:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_shadow_paper --side PUT --auto-nifty-atm --wait-for-market-open --quantity 65 --poll-seconds 30 --reset
+```
+
+For a calmer first test, wait until 09:20 IST before entry:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_shadow_paper --side CALL --auto-nifty-atm --wait-for-market-open --wait-after-open-minutes 5 --quantity 65 --poll-seconds 30 --reset
+```
+
+To let the previous strategy logic decide CALL or PUT automatically, use `--side AUTO`:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_shadow_paper --side AUTO --auto-nifty-atm --wait-for-market-open --wait-after-open-minutes 5 --quantity 65 --poll-seconds 30 --signal-poll-seconds 60 --reset
+```
+
+For a full day-style paper test that keeps looking for new opportunities after a trade closes:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_shadow_paper --side AUTO --auto-nifty-atm --wait-for-market-open --wait-after-open-minutes 5 --quantity 65 --poll-seconds 30 --signal-poll-seconds 60 --max-trades 3 --reentry-wait-seconds 300 --stop-new-entries-at 15:00 --reset
+```
+
+This closes each paper trade by stop/target/trailing rules, waits 5 minutes, then searches for the next AUTO signal until either 3 trades are closed or 15:00 IST is reached.
+
+AUTO mode fetches live NIFTY 5-minute candles and uses the earlier breakout/SMA rule:
+
+- CALL when the latest close breaks above the prior 5-candle high and the 5-candle SMA is rising
+- PUT when the latest close breaks below the prior 5-candle low and the 5-candle SMA is falling
+
+Use `--max-ticks 3` for a short test run:
+
+```powershell
+py -m aadithya_quantlab.trading.zerodha_shadow_paper --side CALL --auto-nifty-atm --wait-for-market-open --quantity 65 --poll-seconds 10 --max-ticks 3 --reset
+```
 
 ## One-Command Safe Workflow
 

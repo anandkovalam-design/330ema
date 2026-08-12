@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from aadithya_quantlab.trading.paper import PaperOrder
 
 NIFTY_PAPER_QUANTITY = 65
+SENSEX_PAPER_QUANTITY = 20
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,31 @@ def build_nifty_option_paper_order(
     return PaperOrder(
         tradingsymbol=tradingsymbol,
         exchange="NFO",
+        transaction_type=transaction,
+        quantity=quantity,
+        order_type="MARKET" if price is None else "LIMIT",
+        product="MIS",
+        validity="DAY",
+        price=price,
+    )
+
+
+def build_sensex_option_paper_order(
+    tradingsymbol: str,
+    transaction_type: str,
+    quantity: int,
+    price: float | None = None,
+) -> PaperOrder:
+    """Create a safe BFO paper-order payload for SENSEX options."""
+
+    transaction = transaction_type.upper()
+    if transaction not in {"BUY", "SELL"}:
+        raise ValueError("transaction_type must be BUY or SELL.")
+    if quantity != SENSEX_PAPER_QUANTITY:
+        raise ValueError(f"SENSEX paper orders must use quantity {SENSEX_PAPER_QUANTITY}.")
+    return PaperOrder(
+        tradingsymbol=tradingsymbol,
+        exchange="BFO",
         transaction_type=transaction,
         quantity=quantity,
         order_type="MARKET" if price is None else "LIMIT",

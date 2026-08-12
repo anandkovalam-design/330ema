@@ -95,6 +95,21 @@ class EmptyHistoryKiteConnect(FakeKiteConnect):
         return []
 
 
+class FailingProfileKiteConnect(FakeKiteConnect):
+    def profile(self) -> dict[str, str]:
+        raise RuntimeError("Incorrect api_key or access_token")
+
+
+class LoginRecoveryKiteConnect(FakeKiteConnect):
+    profile_calls = 0
+
+    def profile(self) -> dict[str, str]:
+        type(self).profile_calls += 1
+        if type(self).profile_calls == 1:
+            raise RuntimeError("Incorrect api_key or access_token")
+        return super().profile()
+
+
 @pytest.fixture()
 def zerodha_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ZERODHA_API_KEY", "kite-api-key")
@@ -190,6 +205,32 @@ def test_check_connection_cli_uses_profile(
     assert exit_code == 0
     assert "user_id=AB1234" in output
     assert "user_name=Test User" in output
+
+
+def test_check_connection_cli_starts_daily_login_then_recovers(
+    zerodha_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = ModuleType("kiteconnect")
+    module.KiteConnect = LoginRecoveryKiteConnect
+    monkeypatch.setitem(sys.modules, "kiteconnect", module)
+
+    login_invoked = {"value": False}
+
+    def fake_daily_login_main(argv: list[str] | None = None) -> int:
+        login_invoked["value"] = True
+        return 0
+
+    monkeypatch.setattr("aadithya_quantlab.trading.zerodha_daily_login.main", fake_daily_login_main)
+
+    exit_code = check_connection_main()
+    output = capsys.readouterr().out.strip()
+
+    assert exit_code == 0
+    assert login_invoked["value"] is True
+    assert "Starting guided daily login now..." in output
+    assert "Connected to Zerodha as user_id=AB1234 user_name=Test User" in output
 
 
 def test_fetch_live_data_cli_ltp(

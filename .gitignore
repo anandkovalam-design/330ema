@@ -21,6 +21,7 @@ outputs/zerodha/
 *.token
 *.secret
 .env
+apikey.txt
 
 # Local system files
 .DS_Store

@@ -1,0 +1,505 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "backtest-120-tpplus10-all",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"work/backtest_last_10_days_actual_options.py",
+				"--mode",
+				"all",
+				"--days",
+				"120",
+				"--target-plus",
+				"10",
+				"--output-tag",
+				"tpplus10"
+			]
+		},
+		{
+			"label": "backtest-120-tpplus10-all-pypath",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-Command",
+				"$env:PYTHONPATH='src'; C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --mode all --days 120 --target-plus 10 --output-tag tpplus10"
+			]
+		},
+		{
+			"label": "backtest-120-tpplus10-all-cmd",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --mode all --days 120 --target-plus 10 --output-tag tpplus10"
+			]
+		},
+		{
+			"label": "summarize-tpplus10-vs-baseline",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe -c \"import pandas as pd; from pathlib import Path; modes=['initial','fixed','adaptive']; rows=['mode,trades_base,wins_base,losses_base,flats_base,wr_base,net_base,trades_tp10,wins_tp10,losses_tp10,flats_tp10,wr_tp10,net_tp10,delta_net'];\nfor m in modes:\n b=Path(f'validation/reports/backtest_last_120_days_actual_options_{m}.csv'); t=Path(f'validation/reports/backtest_last_120_days_actual_options_{m}_tpplus10.csv');\n db=pd.read_csv(b); dt=pd.read_csv(t);\n tb=len(db); tt=len(dt);\n wb=int((db['result']=='WIN').sum()) if tb else 0; lb=int((db['result']=='LOSS').sum()) if tb else 0; fb=int((db['result']=='FLAT').sum()) if tb else 0; wrb=(wb/tb*100.0) if tb else 0.0; nb=float(db['pnl_points'].sum()) if tb else 0.0;\n wt=int((dt['result']=='WIN').sum()) if tt else 0; lt=int((dt['result']=='LOSS').sum()) if tt else 0; ft=int((dt['result']=='FLAT').sum()) if tt else 0; wrt=(wt/tt*100.0) if tt else 0.0; nt=float(dt['pnl_points'].sum()) if tt else 0.0;\n rows.append(f'{m},{tb},{wb},{lb},{fb},{wrb:.2f},{nb:.2f},{tt},{wt},{lt},{ft},{wrt:.2f},{nt:.2f},{(nt-nb):.2f}')\n Path('validation/reports/backtest_last_120_days_target_plus10_comparison.csv').write_text('\\n'.join(rows), encoding='utf-8')\""
+			]
+		},
+		{
+			"label": "run-summarize-tpplus10",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"work/summarize_tpplus10.py"
+			]
+		},
+		{
+			"label": "check-initial-expiries-120",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"-c",
+				"import pandas as pd; from pathlib import Path; p=Path('validation/reports/backtest_last_120_days_actual_options_initial.csv'); df=pd.read_csv(p); df['session_date']=pd.to_datetime(df['session_date'], errors='coerce'); df['expiry']=pd.to_datetime(df['expiry'], errors='coerce'); out=[]; out.append(f'rows={len(df)}'); out.append(f'session_min={df.session_date.min().date()}'); out.append(f'session_max={df.session_date.max().date()}'); out.append(f'unique_expiries={df.expiry.dt.date.nunique()}'); vc=df.expiry.dt.date.value_counts().sort_index(); out.append('expiries_with_trade_counts='); [out.append(f'{d},{int(c)}') for d,c in vc.items()]; Path('validation/reports/initial_120_expiry_check.txt').write_text('\\n'.join(out), encoding='utf-8'); print('validation/reports/initial_120_expiry_check.txt')"
+			]
+		},
+		{
+			"label": "run-check-initial-expiry-120",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"work/check_initial_expiry_120.py"
+			]
+		},
+		{
+			"label": "backtest-120-all-tuesday-expiry",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --mode all --days 120 --output-tag tuesday"
+			]
+		},
+		{
+			"label": "summarize-tuesday-vs-baseline",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"work/summarize_tuesday_vs_baseline.py"
+			]
+		},
+		{
+			"label": "check-tuesday-date-span",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"work/check_tuesday_date_span.py"
+			]
+		},
+		{
+			"label": "backtest-120-all-tuesday-strict",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --mode all --days 120 --output-tag tuesday_strict --require-full-expiry-coverage"
+			]
+		},
+		{
+			"label": "backtest-120-all-tuesday-relaxed",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --mode all --days 120 --output-tag tuesday_relaxed"
+			]
+		},
+		{
+			"label": "summarize-tuesday-relaxed",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"work/summarize_tuesday_strict_relaxed.py"
+			]
+		},
+		{
+			"label": "inspect-sensex-instruments",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/inspect_sensex_instruments.py"
+			]
+		},
+		{
+			"label": "inspect-sensex-spot",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/inspect_sensex_spot.py"
+			]
+		},
+		{
+			"label": "read-zerodha-live-snippet",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/read_zerodha_live_snippet.py"
+			]
+		},
+		{
+			"label": "backtest-sensex-current-week-initial-smoke",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --underlying SENSEX --current-week-only --days 7 --mode initial --output-tag smoke"
+			]
+		},
+		{
+			"label": "backtest-sensex-current-week-all",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --underlying SENSEX --current-week-only --days 7 --mode all --output-tag live"
+			]
+		},
+		{
+			"label": "summarize-sensex-current-week",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"work/summarize_sensex_current_week.py"
+			]
+		},
+		{
+			"label": "sensex-access-window",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/sensex_access_window.py"
+			]
+		},
+		{
+			"label": "backtest-sensex-last-accessible-all",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --underlying SENSEX --days 7 --mode all --output-tag accessible"
+			]
+		},
+		{
+			"label": "backtest-nifty-current-week-all",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py --underlying NIFTY --current-week-only --days 7 --mode all --output-tag currentweek"
+			]
+		},
+		{
+			"label": "summarize-requested-runs",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"work/summarize_requested_runs.py"
+			]
+		},
+		{
+			"label": "backtest-default-initial-smoke",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_last_10_days_actual_options.py"
+			]
+		},
+		{
+			"label": "probe-max-access-days",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/probe_max_access_days.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-nifty-5m-cutoff-30d-rerun",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 30 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --output-tag 5m_cutoff_30d_rerun"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-nifty-5m-baseline-30d-rerun",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 30 --signal-interval 5minute --entry-start 09:16 --entry-end 15:00 --output-tag 5m_baseline_30d_rerun"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-nifty-5m-cutoff-today",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 1 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --output-tag 5m_cutoff_today"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-live-paper-trailing-syntax",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"-m",
+				"py_compile",
+				"work/live_paper_nifty_ema3_30_cutoff.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-today-5m-dynamic-trail",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 3 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --trail-activate-pct 20 --trail-lock-pct 10 --trail-trigger-points 15 --trail-step-points 5 --session-date 2026-07-23 --output-tag 5m_today_dynamic_trail"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-10d-5m-dynamic-trail",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 10 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --trail-activate-pct 20 --trail-lock-pct 10 --trail-trigger-points 15 --trail-step-points 5 --output-tag 5m_10d_dynamic_trail"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-15d-5m-dynamic-trail",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 15 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --trail-activate-pct 20 --trail-lock-pct 10 --trail-trigger-points 15 --trail-step-points 5 --output-tag 5m_15d_dynamic_trail"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-today-5m-dynamic-trail",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 3 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --trail-activate-pct 20 --trail-lock-pct 10 --trail-trigger-points 15 --trail-step-points 5 --session-date 2026-07-24 --output-tag 5m_today_check_2026_07_24"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "zerodha-login-url",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe -m aadithya_quantlab.trading.zerodha_login_url"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "zerodha-check-connection-now",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe -m aadithya_quantlab.trading.zerodha_check_connection"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-today-5m-dynamic-trail-2026-07-24",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 3 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --trail-activate-pct 20 --trail-lock-pct 10 --trail-trigger-points 15 --trail-step-points 5 --session-date 2026-07-24 --output-tag 5m_today_check_2026_07_24"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "inspect-2026-07-24-trail-path",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe -c \"import pandas as pd; from datetime import datetime; from zoneinfo import ZoneInfo; from aadithya_quantlab.trading.zerodha_live import build_safe_kite_client_from_env; IST=ZoneInfo('Asia/Kolkata'); kite=build_safe_kite_client_from_env(); rows=kite.instruments('NFO'); token=None\nfor r in rows:\n s=str(r.get('tradingsymbol',''))\n if s=='NIFTY26JUL23700CE': token=int(r.get('instrument_token')); break\nassert token is not None, 'token not found'\nstart=datetime(2026,7,24,11,45,tzinfo=IST); end=datetime(2026,7,24,13,40,tzinfo=IST)\nc=kite.historical_data(token,start,end,'minute',oi=False)\ndf=pd.DataFrame(c)\nif df.empty:\n print('NO_DATA')\nelse:\n df['date']=pd.to_datetime(df['date'])\n print('rows',len(df))\n print('max_high',float(df['high'].max()))\n r1200=df[df['date'].dt.tz_convert('Asia/Kolkata').dt.strftime('%H:%M')=='12:00']\n if not r1200.empty:\n  row=r1200.iloc[0]\n  print('12:00 OHLc',float(row['open']),float(row['high']),float(row['low']),float(row['close']))\n else:\n  print('12:00 missing')\n df.to_csv('validation/reports/nifty26jul23700ce_2026_07_24_1145_1340_minute.csv',index=False)\n print('CSV=validation/reports/nifty26jul23700ce_2026_07_24_1145_1340_minute.csv')\""
+			],
+			"isBackground": false
+		},
+		{
+			"label": "inspect-today-trail-question",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/inspect_today_trail_question.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "compile-backtest-after-staged-exit-update",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"-m",
+				"py_compile",
+				"work/backtest_nifty_5m_ema3_30_crossover.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-today-5m-staged-exit-2lots",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 3 --session-date 2026-07-24 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --lots 2 --sl-to-cost-profit-pct 30 --book-half-profit-pct 40 --trail-after-profit-pct 50 --mfe-giveback-pct 27.5 --trail-trigger-points 15 --trail-step-points 5 --output-tag 5m_today_staged_exit_2lots"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-10d-5m-staged-exit-2lots",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 10 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --lots 2 --sl-to-cost-profit-pct 30 --book-half-profit-pct 40 --trail-after-profit-pct 50 --mfe-giveback-pct 27.5 --trail-trigger-points 15 --trail-step-points 5 --output-tag 5m_10d_staged_exit_2lots"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-15d-5m-staged-exit-2lots",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 15 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --lots 2 --sl-to-cost-profit-pct 30 --book-half-profit-pct 40 --trail-after-profit-pct 50 --mfe-giveback-pct 27.5 --trail-trigger-points 15 --trail-step-points 5 --output-tag 5m_15d_staged_exit_2lots"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-10d-5m-legacy-dynamic-2lots",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 10 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --legacy-dynamic-trail --lots 2 --trail-activate-pct 20 --trail-lock-pct 10 --trail-trigger-points 15 --trail-step-points 5 --output-tag 5m_10d_legacy_dynamic_2lots"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-15d-5m-legacy-dynamic-2lots",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --days 15 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --legacy-dynamic-trail --lots 2 --trail-activate-pct 20 --trail-lock-pct 10 --trail-trigger-points 15 --trail-step-points 5 --output-tag 5m_15d_legacy_dynamic_2lots"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "compile-backtest-multi-underlying",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"-m",
+				"py_compile",
+				"work/backtest_nifty_5m_ema3_30_crossover.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-sensex-5m-staged-2lots-10d",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --underlying SENSEX --days 10 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --lots 2 --sl-to-cost-profit-pct 30 --book-half-profit-pct 40 --trail-after-profit-pct 50 --mfe-giveback-pct 27.5 --trail-trigger-points 15 --trail-step-points 5 --output-tag sensex_5m_10d_staged_2lots"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "inspect-premier-energies-instruments",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe -c \"from aadithya_quantlab.trading.zerodha_live import build_safe_kite_client_from_env; kite=build_safe_kite_client_from_env(); nfo=kite.instruments('NFO'); nse=kite.instruments('NSE'); keys=['PREMIER','ENERG']; nfo_m=[r for r in nfo if any(k in str(r.get('tradingsymbol','')).upper() for k in keys)]; nse_m=[r for r in nse if any(k in str(r.get('tradingsymbol','')).upper() or k in str(r.get('name','')).upper() for k in keys)]; print('NFO_MATCHES',len(nfo_m)); print('NSE_MATCHES',len(nse_m));\nfor r in nse_m[:10]: print('NSE',r.get('tradingsymbol'),r.get('name'),r.get('instrument_token'));\nfor r in nfo_m[:40]: print('NFO',r.get('tradingsymbol'),r.get('name'),r.get('instrument_type'),r.get('expiry'),r.get('strike'),r.get('instrument_token'),r.get('lot_size'));\""
+			],
+			"isBackground": false
+		},
+		{
+			"label": "inspect-premier-energies-script",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/inspect_premier_energies_instruments.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "compile-backtest-jswenergy-underlying",
+			"type": "shell",
+			"command": "C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe",
+			"args": [
+				"-m",
+				"py_compile",
+				"work/backtest_nifty_5m_ema3_30_crossover.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "backtest-jswenergy-5m-staged-2lots-10d",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/backtest_nifty_5m_ema3_30_crossover.py --underlying JSWENERGY --days 10 --signal-interval 5minute --entry-start 09:16 --entry-end 12:59 --no-fixed-target --lots 2 --sl-to-cost-profit-pct 30 --book-half-profit-pct 40 --trail-after-profit-pct 50 --mfe-giveback-pct 27.5 --trail-trigger-points 15 --trail-step-points 5 --output-tag jswenergy_5m_10d_staged_2lots"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "matrix-nifty-sensex-10d15d-staged-legacy-2lots",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe -c \"import subprocess, os, csv, re; from pathlib import Path; root=Path('.'); py='C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe'; script='work/backtest_nifty_5m_ema3_30_crossover.py'; base=['--signal-interval','5minute','--entry-start','09:16','--entry-end','12:59','--no-fixed-target','--lots','2','--sl-to-cost-profit-pct','30','--book-half-profit-pct','40','--trail-after-profit-pct','50','--mfe-giveback-pct','27.5','--trail-trigger-points','15','--trail-step-points','5']; jobs=[('NIFTY',10,'staged','nifty_10d_staged_2lots_matrix',[]),('NIFTY',10,'legacy','nifty_10d_legacy_2lots_matrix',['--legacy-dynamic-trail']),('NIFTY',15,'staged','nifty_15d_staged_2lots_matrix',[]),('NIFTY',15,'legacy','nifty_15d_legacy_2lots_matrix',['--legacy-dynamic-trail']),('SENSEX',10,'staged','sensex_10d_staged_2lots_matrix',[]),('SENSEX',10,'legacy','sensex_10d_legacy_2lots_matrix',['--legacy-dynamic-trail']),('SENSEX',15,'staged','sensex_15d_staged_2lots_matrix',[]),('SENSEX',15,'legacy','sensex_15d_legacy_2lots_matrix',['--legacy-dynamic-trail'])]; rows=[]; env=os.environ.copy(); env['PYTHONPATH']='src'; pat=re.compile(r'DAYS=(\\d+) TRADES=(\\d+) WINS=(\\d+) LOSSES=(\\d+) FLATS=(\\d+) NET_OPTION_POINTS=([\\-0-9\\.]+)'); patcsv=re.compile(r'RESULT_CSV=(.+)');\nfor u,d,m,tag,extra in jobs:\n cmd=[py,script,'--underlying',u,'--days',str(d),'--output-tag',tag,*base,*extra];\n p=subprocess.run(cmd,capture_output=True,text=True,env=env);\n out=(p.stdout or '')+'\\n'+(p.stderr or '');\n m1=pat.search(out); m2=patcsv.search(out);\n if p.returncode!=0 or not m1 or not m2:\n  raise SystemExit(f'Run failed for {u} {d} {m}:\\n{out}');\n rows.append({'underlying':u,'days':int(d),'mode':m,'trades':int(m1.group(2)),'wins':int(m1.group(3)),'losses':int(m1.group(4)),'flats':int(m1.group(5)),'net_option_points':float(m1.group(6)),'result_csv':m2.group(1).strip()});\nout_path=Path('validation/reports/nifty_sensex_5m_2lots_mode_matrix_summary.csv');\nout_path.parent.mkdir(parents=True,exist_ok=True);\nwith out_path.open('w',newline='',encoding='utf-8') as f:\n w=csv.DictWriter(f,fieldnames=['underlying','days','mode','trades','wins','losses','flats','net_option_points','result_csv']); w.writeheader(); w.writerows(rows);\nprint(out_path.as_posix());\nfor r in rows: print(f\"{r['underlying']} {r['days']}d {r['mode']} trades={r['trades']} wins={r['wins']} losses={r['losses']} net={r['net_option_points']:.2f}\");\""
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-nifty-sensex-mode-matrix-summary",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PYTHONPATH=src&& C:/Users/Dynabook/AppData/Local/Programs/Python/Python313/python.exe work/run_nifty_sensex_matrix.py"
+			],
+			"isBackground": false
+		}
+	]
+}

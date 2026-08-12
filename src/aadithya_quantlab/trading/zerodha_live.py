@@ -15,6 +15,7 @@ from aadithya_quantlab.trading.zerodha import build_kite_login_url
 
 
 DEFAULT_ACCESS_TOKEN_FILE = Path("outputs/zerodha/access_token.txt")
+DEFAULT_API_KEY_FILE = Path("outputs/zerodha/api_key.txt")
 
 
 class NoHistoricalCandlesError(ValueError):
@@ -26,6 +27,24 @@ def _get_required_env(name: str) -> str:
     if not value:
         raise ValueError(f"Set {name} before running this command.")
     return value
+
+
+def load_api_key(
+    *,
+    env_var: str = "ZERODHA_API_KEY",
+    fallback_path: str | Path = DEFAULT_API_KEY_FILE,
+) -> str:
+    api_key = os.getenv(env_var, "").strip()
+    if api_key:
+        return api_key
+
+    path = Path(fallback_path)
+    if path.exists():
+        file_key = path.read_text(encoding="utf-8").strip()
+        if file_key:
+            return file_key
+
+    raise ValueError(f"Set {env_var} or provide a non-empty API key file at {path}.")
 
 
 def _mask_secret(value: str) -> str:
@@ -103,6 +122,16 @@ class SafeKiteClient:
     def quote(self, instrument: str) -> dict[str, Any]:
         return self._kite.quote(instrument)
 
+    def quote_many(self, instruments: list[str]) -> dict[str, Any]:
+        if not instruments:
+            return {}
+        return self._kite.quote(*instruments)
+
+    def instruments(self, exchange: str | None = None) -> list[dict[str, Any]]:
+        if exchange is None:
+            return self._kite.instruments()
+        return self._kite.instruments(exchange)
+
     def historical_data(
         self,
         instrument_token: int,
@@ -127,7 +156,7 @@ class SafeKiteClient:
 
 
 def build_login_url_from_env() -> str:
-    api_key = _get_required_env("ZERODHA_API_KEY")
+    api_key = load_api_key()
     return build_kite_login_url(api_key)
 
 
@@ -178,7 +207,7 @@ def run_daily_login(inputs: DailyLoginInputs) -> AccessTokenResult:
 
 
 def build_safe_kite_client_from_env() -> SafeKiteClient:
-    api_key = _get_required_env("ZERODHA_API_KEY")
+    api_key = load_api_key()
     access_token = load_access_token()
 
     kite_connect_class = _load_kite_connect_class()

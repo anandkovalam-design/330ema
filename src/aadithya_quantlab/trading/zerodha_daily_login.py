@@ -32,6 +32,13 @@ def _prompt_required(
     return value
 
 
+def _print_request_token_flow(api_key: str) -> None:
+    print("API key verified.")
+    print("Open this Zerodha login URL to generate a request token:")
+    print(build_kite_login_url(api_key))
+    print("After login, copy request_token from the redirected browser URL.")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Guided daily Zerodha login. Use once each trading day, then reuse saved token."
@@ -50,9 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 
     api_key = _prompt_required("ZERODHA_API_KEY", env_name="ZERODHA_API_KEY")
     if not args.skip_url:
-        print("Open this Zerodha login URL:")
-        print(build_kite_login_url(api_key))
-        print("After login, copy request_token from the redirected browser URL.")
+        _print_request_token_flow(api_key)
 
     request_token = _prompt_required("ZERODHA_REQUEST_TOKEN", env_name="ZERODHA_REQUEST_TOKEN")
     api_secret = _prompt_required(
@@ -77,3 +82,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
