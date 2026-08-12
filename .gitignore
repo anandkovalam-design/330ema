@@ -21,7 +21,10 @@ outputs/zerodha/
 *.token
 *.secret
 .env
+.streamlit/secrets.toml
 apikey.txt
+request_token*
+*.request-token
 
 # Local system files
 .DS_Store

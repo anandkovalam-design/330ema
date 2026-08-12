@@ -41,6 +41,167 @@ This dashboard is isolated in `aadithya_quantlab.zerodha_live_trading`. It
 starts in PAPER mode; REAL orders require selecting REAL and separately arming
 the live-order confirmation.
 
+## Zerodha dashboard: Docker and Azure Container Apps
+
+The container deployment is intentionally PAPER-only. `ZERODHA_CLOUD_MODE=true`
+hard-blocks broker order placement even if a browser user selects REAL. Local
+Windows sessions retain the existing supervised REAL-mode confirmation, but a
+restarted session must reconcile recovered broker activity before it can be
+armed again.
+
+### Local Docker
+
+Build from the repository root. Do not add credentials to the image or build
+arguments.
+
+```powershell
+docker build -t zerodha-dashboard:local .
+docker volume create zerodha-dashboard-data
+docker run --rm -p 8501:8501 `
+  --name zerodha-dashboard `
+  --mount source=zerodha-dashboard-data,target=/mnt/zerodha `
+  --env ZERODHA_CLOUD_MODE=true `
+  --env ZERODHA_API_KEY=$env:ZERODHA_API_KEY `
+  --env ZERODHA_API_SECRET=$env:ZERODHA_API_SECRET `
+  zerodha-dashboard:local
+```
+
+Open `http://localhost:8501`. The named Docker volume stores today's access
+token and `streamlit_dashboard_state.json`; removing the container does not
+remove that volume. The API key and API secret remain environment variables.
+For a local Windows run without Docker, the dashboard still falls back to
+Windows Credential Manager when those environment variables are absent.
+
+### Azure prerequisites and image build
+
+Install Azure CLI, Docker (only needed for the local check), and the Container
+Apps extension. The following PowerShell commands use unique Azure resource
+names; replace the two marked values first.
+
+```powershell
+az login
+az extension add --name containerapp --upgrade
+az provider register --namespace Microsoft.App
+az provider register --namespace Microsoft.OperationalInsights
+
+$Location = "centralindia"
+$ResourceGroup = "rg-zerodha-dashboard"
+$ContainerEnv = "cae-zerodha-dashboard"
+$ContainerApp = "ca-zerodha-dashboard"
+$AcrName = "<globally-unique-acr-name>"
+$StorageAccount = "<globallyuniquestorageaccount>"
+$FileShare = "zerodha-dashboard"
+$IdentityName = "id-zerodha-dashboard"
+$KeyVaultName = "<globally-unique-key-vault-name>"
+$ImageTag = "v1"
+
+az group create --name $ResourceGroup --location $Location
+az acr create --resource-group $ResourceGroup --name $AcrName --sku Basic
+az acr build --registry $AcrName --image "zerodha-dashboard:$ImageTag" .
+az containerapp env create --name $ContainerEnv --resource-group $ResourceGroup --location $Location
+```
+
+### Persistent Azure Files state
+
+Create one read/write Azure Files share and register it with the Container Apps
+environment. Keep the app at exactly one replica: the current JSON store is an
+atomic single-writer recovery scaffold, not a distributed database.
+
+```powershell
+az storage account create --name $StorageAccount --resource-group $ResourceGroup --location $Location --sku Standard_LRS
+az storage share-rm create --resource-group $ResourceGroup --storage-account $StorageAccount --name $FileShare --quota 1
+$StorageKey = az storage account keys list --resource-group $ResourceGroup --account-name $StorageAccount --query "[0].value" -o tsv
+az containerapp env storage set --name $ContainerEnv --resource-group $ResourceGroup `
+  --storage-name zerodha-files --storage-type AzureFile --access-mode ReadWrite `
+  --azure-file-account-name $StorageAccount --azure-file-account-key $StorageKey `
+  --azure-file-share-name $FileShare
+Remove-Variable StorageKey
+```
+
+The mounted `/mnt/zerodha` directory contains the daily access-token envelope,
+risk settings, and durable engine state. Azure Storage encrypts the share at
+rest. Restrict Storage Account network access and enable backup/retention to
+match your recovery requirements.
+
+### API credentials in Key Vault
+
+Create a user-assigned identity for image pulls and Key Vault reads. Enter the
+two Zerodha values only at the prompt; they are never written into this
+repository. The request token and daily access token must not be stored in
+source control.
+
+```powershell
+az identity create --name $IdentityName --resource-group $ResourceGroup --location $Location
+$IdentityId = az identity show --name $IdentityName --resource-group $ResourceGroup --query id -o tsv
+$IdentityPrincipalId = az identity show --name $IdentityName --resource-group $ResourceGroup --query principalId -o tsv
+$AcrId = az acr show --name $AcrName --resource-group $ResourceGroup --query id -o tsv
+az role assignment create --assignee-object-id $IdentityPrincipalId --assignee-principal-type ServicePrincipal --role AcrPull --scope $AcrId
+
+az keyvault create --name $KeyVaultName --resource-group $ResourceGroup --location $Location --enable-rbac-authorization true
+$VaultId = az keyvault show --name $KeyVaultName --resource-group $ResourceGroup --query id -o tsv
+az role assignment create --assignee-object-id $IdentityPrincipalId --assignee-principal-type ServicePrincipal --role "Key Vault Secrets User" --scope $VaultId
+$SignedInObjectId = az ad signed-in-user show --query id -o tsv
+az role assignment create --assignee-object-id $SignedInObjectId --role "Key Vault Secrets Officer" --scope $VaultId
+
+$ZerodhaApiKey = Read-Host "ZERODHA_API_KEY"
+$ZerodhaApiSecret = Read-Host "ZERODHA_API_SECRET"
+az keyvault secret set --vault-name $KeyVaultName --name zerodha-api-key --value $ZerodhaApiKey --output none
+az keyvault secret set --vault-name $KeyVaultName --name zerodha-api-secret --value $ZerodhaApiSecret --output none
+Remove-Variable ZerodhaApiKey, ZerodhaApiSecret
+```
+
+### Deploy the Container App
+
+The checked-in template starts with internal ingress and PAPER-only cloud mode.
+Render its placeholders to a temporary file, then create the app:
+
+```powershell
+$ManagedEnvironmentId = az containerapp env show --name $ContainerEnv --resource-group $ResourceGroup --query id -o tsv
+$AcrLoginServer = az acr show --name $AcrName --resource-group $ResourceGroup --query loginServer -o tsv
+$Template = Get-Content -Raw deploy/azure/containerapp.template.yaml
+$Template = $Template.Replace("<MANAGED_ENVIRONMENT_RESOURCE_ID>", $ManagedEnvironmentId)
+$Template = $Template.Replace("<USER_ASSIGNED_IDENTITY_RESOURCE_ID>", $IdentityId)
+$Template = $Template.Replace("<ACR_LOGIN_SERVER>", $AcrLoginServer)
+$Template = $Template.Replace("<IMAGE_TAG>", $ImageTag)
+$Template = $Template.Replace("<KEY_VAULT_NAME>", $KeyVaultName)
+$DeployFile = Join-Path $env:TEMP "zerodha-containerapp.yaml"
+Set-Content -Path $DeployFile -Value $Template
+az containerapp create --name $ContainerApp --resource-group $ResourceGroup --yaml $DeployFile
+Remove-Item $DeployFile
+```
+
+Keep ingress internal, or configure Microsoft Entra authentication before
+changing ingress to external. This dashboard exposes trading controls and must
+never be anonymously reachable. Follow the official Container Apps Easy Auth
+flow, set unauthenticated access to `RedirectToLoginPage` (or `Return401`), and
+only then run:
+
+```powershell
+az containerapp ingress update --name $ContainerApp --resource-group $ResourceGroup --type external --target-port 8501
+```
+
+Set the Zerodha app redirect URL to the authenticated Container App URL. Each
+trading day, use the dashboard's Zerodha login flow and paste the short-lived
+request token. The resulting access token is written with restricted file
+permissions to the mounted share and is accepted only for the current IST date.
+
+### Restart and recovery behavior
+
+- PAPER remains the default after every browser/server restart.
+- Open trade, last signal, trades taken, realized P&L, stop/trailing values, and
+  broker order IDs are saved atomically outside `st.session_state`.
+- Recovered REAL broker activity disables the affected engine and requires the
+  read-only **Reconcile recovered state with Zerodha** action.
+- Reconciliation reads `orders()` and `positions()`; it never places, modifies,
+  or cancels an order.
+- Cloud mode cannot place REAL orders. Moving to autonomous REAL execution needs
+  a separate design review, distributed transactional storage, fill-aware order
+  lifecycle handling, authenticated operator controls, and production testing.
+
+Azure references: [storage mounts](https://learn.microsoft.com/azure/container-apps/storage-mounts),
+[Key Vault-backed Container Apps secrets](https://learn.microsoft.com/azure/container-apps/manage-secrets),
+and [Container Apps authentication](https://learn.microsoft.com/azure/container-apps/authentication).
+
 Run daily Zerodha login setup once per trading day:
 
 ```powershell

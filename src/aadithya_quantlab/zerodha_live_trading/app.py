@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, time as wall_time, timedelta
-from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -13,11 +13,19 @@ import streamlit as st
 from kiteconnect import KiteConnect
 
 from aadithya_quantlab.trading.zerodha import build_kite_login_url
+from aadithya_quantlab.zerodha_live_trading.persistence import (
+    load_daily_connection,
+    load_engine_state,
+    runtime_path,
+    save_daily_connection,
+    save_engine_state,
+)
 
 
 IST = ZoneInfo("Asia/Kolkata")
-CONNECTION_STORE_PATH = Path("outputs/zerodha/streamlit_dashboard_connection.json")
-RISK_SETTINGS_PATH = Path("outputs/zerodha/live_trading_risk_settings.json")
+CONNECTION_STORE_PATH = runtime_path("streamlit_dashboard_connection.json")
+RISK_SETTINGS_PATH = runtime_path("live_trading_risk_settings.json")
+TRADING_STATE_PATH = runtime_path("streamlit_dashboard_state.json")
 CREDENTIAL_SERVICE_NAME = "aadithya-zerodha-live-trading"
 API_KEY_ACCOUNT = "api-key"
 API_SECRET_ACCOUNT = "api-secret"
@@ -90,6 +98,27 @@ def _today_ist_iso() -> str:
     return datetime.now(IST).date().isoformat()
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_cloud_runtime() -> bool:
+    return _env_flag("ZERODHA_CLOUD_MODE")
+
+
+def _runtime_secret(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(name, "")).strip()
+    except Exception:
+        return ""
+
+
 def _credential_keyring():
     try:
         import keyring
@@ -100,6 +129,11 @@ def _credential_keyring():
 
 
 def _save_login_credentials(api_key: str, api_secret: str) -> None:
+    if _is_cloud_runtime():
+        raise RuntimeError(
+            "Cloud credentials are read-only. Configure ZERODHA_API_KEY and "
+            "ZERODHA_API_SECRET as Container Apps secret references."
+        )
     keyring, keyring_error = _credential_keyring()
     try:
         keyring.set_password(CREDENTIAL_SERVICE_NAME, API_KEY_ACCOUNT, api_key.strip())
@@ -109,6 +143,16 @@ def _save_login_credentials(api_key: str, api_secret: str) -> None:
 
 
 def _load_login_credentials() -> dict[str, str] | None:
+    api_key_env = _runtime_secret("ZERODHA_API_KEY")
+    api_secret_env = _runtime_secret("ZERODHA_API_SECRET")
+    if api_key_env or api_secret_env:
+        if not api_key_env or not api_secret_env:
+            raise RuntimeError(
+                "ZERODHA_API_KEY and ZERODHA_API_SECRET must both be configured."
+            )
+        return {"api_key": api_key_env, "api_secret": api_secret_env}
+    if _is_cloud_runtime():
+        return None
     keyring, keyring_error = _credential_keyring()
     try:
         api_key = str(keyring.get_password(CREDENTIAL_SERVICE_NAME, API_KEY_ACCOUNT) or "").strip()
@@ -121,6 +165,8 @@ def _load_login_credentials() -> dict[str, str] | None:
 
 
 def _clear_login_credentials() -> None:
+    if _is_cloud_runtime():
+        raise RuntimeError("Cloud secrets must be removed through Azure, not from the dashboard.")
     keyring, keyring_error = _credential_keyring()
     try:
         for account in (API_KEY_ACCOUNT, API_SECRET_ACCOUNT):
@@ -166,26 +212,24 @@ def _save_risk_settings(engine_state: dict[str, dict[str, Any]]) -> None:
 
 
 def _save_connection_for_today(api_key: str, access_token: str) -> None:
-    CONNECTION_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "date": _today_ist_iso(),
-        "api_key": api_key.strip(),
-        "access_token": access_token.strip(),
-    }
-    CONNECTION_STORE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    save_daily_connection(
+        CONNECTION_STORE_PATH,
+        session_date=_today_ist_iso(),
+        access_token=access_token,
+        api_key=None if _is_cloud_runtime() else api_key,
+    )
 
 
 def _load_connection_for_today() -> dict[str, str] | None:
-    if not CONNECTION_STORE_PATH.exists():
+    api_key = _runtime_secret("ZERODHA_API_KEY")
+    access_token = _runtime_secret("ZERODHA_ACCESS_TOKEN")
+    if api_key and access_token:
+        return {"api_key": api_key, "access_token": access_token}
+    saved = load_daily_connection(CONNECTION_STORE_PATH, session_date=_today_ist_iso())
+    if not saved:
         return None
-    try:
-        payload = json.loads(CONNECTION_STORE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if str(payload.get("date", "")).strip() != _today_ist_iso():
-        return None
-    api_key = str(payload.get("api_key", "")).strip()
-    access_token = str(payload.get("access_token", "")).strip()
+    api_key = api_key or saved.get("api_key", "")
+    access_token = saved.get("access_token", "")
     if not api_key or not access_token:
         return None
     return {"api_key": api_key, "access_token": access_token}
@@ -536,6 +580,114 @@ def _default_state_for(cfg: UnderlyingConfig) -> dict[str, Any]:
         "max_trades": 3,
         "trades_taken": 0,
         "entry_status": "Waiting for market data",
+        "reconciliation_required": False,
+        "reconciliation_status": "NOT_REQUIRED",
+    }
+
+
+def _persist_engine_state(engine_state: dict[str, dict[str, Any]]) -> None:
+    save_engine_state(
+        TRADING_STATE_PATH,
+        session_date=_today_ist_iso(),
+        engine_state=engine_state,
+        saved_at=datetime.now(IST),
+    )
+
+
+def _has_unverified_broker_activity(state: dict[str, Any]) -> bool:
+    open_trade = state.get("open_trade")
+    if isinstance(open_trade, dict) and str(open_trade.get("trade_mode", "PAPER")).upper() == "REAL":
+        return True
+    logs = state.get("order_logs", [])
+    return any(
+        isinstance(row, dict)
+        and bool(str(row.get("order_id", "")).strip())
+        and str(row.get("order_id", "")).upper() != "PAPER"
+        for row in logs
+    )
+
+
+def _restore_persistent_engine_state() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    persisted, metadata = load_engine_state(TRADING_STATE_PATH)
+    restored = {name: _default_state_for(cfg) for name, cfg in UNDERLYINGS.items()}
+    for name, saved_state in persisted.items():
+        if name not in restored:
+            continue
+        restored[name].update(saved_state)
+        if _has_unverified_broker_activity(restored[name]):
+            restored[name]["reconciliation_required"] = True
+            restored[name]["reconciliation_status"] = "REQUIRED_AFTER_RESTART"
+            restored[name]["enabled"] = False
+            restored[name]["entry_status"] = "Recovered state; broker reconciliation required"
+    return restored, metadata
+
+
+def _reconcile_engine_state_with_broker(
+    kite: KiteConnect,
+    engine_state: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Read broker orders/positions and clear recovery gates only on an exact match."""
+
+    orders = kite.orders()
+    position_payload = kite.positions()
+    net_positions = position_payload.get("net", []) if isinstance(position_payload, dict) else []
+    orders_by_id = {
+        str(row.get("order_id", "")): row
+        for row in orders
+        if isinstance(row, dict) and row.get("order_id")
+    }
+    positions_by_instrument = {
+        f"{row.get('exchange', '')}:{row.get('tradingsymbol', '')}": int(row.get("quantity", 0))
+        for row in net_positions
+        if isinstance(row, dict)
+    }
+
+    issues: list[str] = []
+    checked_order_ids: list[str] = []
+    expected_open_instruments: set[str] = set()
+    tracked_instruments: set[str] = set()
+    for name, state in engine_state.items():
+        for log in state.get("order_logs", []):
+            if not isinstance(log, dict):
+                continue
+            instrument = str(log.get("instrument", "")).strip()
+            if instrument:
+                tracked_instruments.add(instrument)
+            order_id = str(log.get("order_id", "")).strip()
+            if order_id and order_id.upper() != "PAPER":
+                checked_order_ids.append(order_id)
+                broker_order = orders_by_id.get(order_id)
+                if broker_order is None:
+                    issues.append(f"{name}: broker order {order_id} was not returned")
+                elif str(broker_order.get("status", "")).upper() not in {"COMPLETE", "CANCELLED", "REJECTED"}:
+                    issues.append(f"{name}: broker order {order_id} is not terminal")
+
+        open_trade = state.get("open_trade")
+        if isinstance(open_trade, dict) and str(open_trade.get("trade_mode", "PAPER")).upper() == "REAL":
+            instrument = str(open_trade.get("instrument", "")).strip()
+            expected_quantity = int(open_trade.get("quantity", 0))
+            expected_open_instruments.add(instrument)
+            tracked_instruments.add(instrument)
+            if positions_by_instrument.get(instrument, 0) != expected_quantity:
+                issues.append(
+                    f"{name}: expected {expected_quantity} open at {instrument}, "
+                    f"broker reports {positions_by_instrument.get(instrument, 0)}"
+                )
+
+    for instrument in sorted(tracked_instruments - expected_open_instruments):
+        if positions_by_instrument.get(instrument, 0) != 0:
+            issues.append(f"Unexpected broker position for tracked instrument {instrument}")
+
+    status = "MISMATCH" if issues else "MATCHED"
+    for state in engine_state.values():
+        if state.get("reconciliation_required"):
+            state["reconciliation_required"] = bool(issues)
+            state["reconciliation_status"] = status
+    return {
+        "status": status,
+        "issues": issues,
+        "checked_order_ids": checked_order_ids,
+        "broker_position_count": len(net_positions),
     }
 
 
@@ -552,6 +704,14 @@ def _entries_blocked_for_expiry_day(
     expiry_week_offset: int,
 ) -> bool:
     return current_weekday == expiry_weekday and expiry_week_offset == 0
+
+
+def _live_orders_permitted(engine: dict[str, Any], real_mode_armed: bool) -> bool:
+    return (
+        bool(real_mode_armed)
+        and not _is_cloud_runtime()
+        and not bool(engine.get("reconciliation_required", False))
+    )
 
 
 def _update_trailing_stop(open_trade: dict[str, Any], engine: dict[str, Any], ltp: float) -> str | None:
@@ -640,8 +800,11 @@ def _run_engine_for(
             position_mode = str(open_trade.get("trade_mode", trade_mode)).upper()
             if position_mode != "REAL":
                 return True
-            if not real_mode_armed:
-                _push_event(engine, f"{cfg.name} REAL mode not armed; exit order blocked for {reason}.")
+            if not _live_orders_permitted(engine, real_mode_armed):
+                _push_event(
+                    engine,
+                    f"{cfg.name} REAL exit blocked for {reason}; local arming and reconciliation are required.",
+                )
                 return False
             try:
                 exit_order_id = _place_market_order(kite, str(open_trade["instrument"]), "SELL", qty)
@@ -758,9 +921,12 @@ def _run_engine_for(
 
     entry_order_id = "PAPER"
     if trade_mode == "REAL":
-        if not real_mode_armed:
+        if not _live_orders_permitted(engine, real_mode_armed):
             engine["last_signal_ts"] = signal_iso
-            _push_event(engine, f"{cfg.name} signal detected but REAL mode is not armed. No live order placed.")
+            _push_event(
+                engine,
+                f"{cfg.name} signal detected but REAL execution is blocked. No live order placed.",
+            )
             return engine
         try:
             entry_order_id = _place_market_order(kite, instrument, "BUY", qty)
@@ -906,6 +1072,7 @@ def _render_live_engine(trade_mode: str, real_mode_armed: bool, expiry_week_offs
                         trade_mode=trade_mode,
                         real_mode_armed=real_mode_armed,
                     )
+                _persist_engine_state(st.session_state.engine_state)
 
                 n_state = st.session_state.engine_state["NIFTY"]
                 s_state = st.session_state.engine_state["SENSEX"]
@@ -932,7 +1099,9 @@ def _render_live_engine(trade_mode: str, real_mode_armed: bool, expiry_week_offs
         else:
             st.warning("Connect first to start live market data + trade engine.")
 
-        st.caption("Signal/data source: direct Zerodha market data. Trade state and P&L are in-memory for this dashboard session.")
+        st.caption(
+            f"Signal/data source: direct Zerodha market data. Durable recovery state: {TRADING_STATE_PATH}."
+        )
 
 
 def _init_session_state() -> None:
@@ -951,11 +1120,10 @@ def _init_session_state() -> None:
     if "credential_warning" not in st.session_state:
         st.session_state.credential_warning = ""
     if "engine_state" not in st.session_state:
-        st.session_state.engine_state = {
-            name: _default_state_for(cfg) for name, cfg in UNDERLYINGS.items()
-        }
+        st.session_state.engine_state, recovery_metadata = _restore_persistent_engine_state()
         for name, settings in _load_risk_settings().items():
             st.session_state.engine_state[name].update(settings)
+        st.session_state.recovery_metadata = recovery_metadata
     else:
         for name, cfg in UNDERLYINGS.items():
             state = st.session_state.engine_state.setdefault(name, {})
@@ -969,6 +1137,10 @@ def _init_session_state() -> None:
         st.session_state.connection_restored = False
     if "risk_settings_saved_at" not in st.session_state:
         st.session_state.risk_settings_saved_at = {}
+    if "recovery_metadata" not in st.session_state:
+        st.session_state.recovery_metadata = {}
+    if "reconciliation_report" not in st.session_state:
+        st.session_state.reconciliation_report = None
     if not st.session_state.connected:
         saved = _load_connection_for_today()
         if saved:
@@ -988,6 +1160,10 @@ def main() -> None:
     _apply_visual_style()
 
     st.markdown("## :material/candlestick_chart: Zerodha live trade control center")
+    if _is_cloud_runtime():
+        st.warning(
+            "Cloud safety mode is active: PAPER execution only. REAL broker orders are hard-disabled in this deployment."
+        )
     h1, h2 = st.columns([2.2, 1.2])
     with h1:
         st.caption("Direct Zerodha data feed, dual-underlying execution, and in-session risk tracking.")
@@ -1006,7 +1182,7 @@ def main() -> None:
                 if st.session_state.credential_warning:
                     st.warning(st.session_state.credential_warning)
             with c2:
-                if st.button("Disconnect", use_container_width=True):
+                if st.button("Disconnect", width="stretch"):
                     st.session_state.connected = False
                     st.session_state.access_token = ""
                     st.session_state.connection_restored = False
@@ -1023,14 +1199,19 @@ def main() -> None:
             if saved_credentials:
                 saved_left, saved_middle, saved_right = st.columns([2.0, 1.0, 1.0])
                 saved_left.info(
-                    f"Saved credentials available: API key {_credential_preview(saved_credentials['api_key'])}; API secret hidden."
+                    f"Configured credentials available: API key {_credential_preview(saved_credentials['api_key'])}; API secret hidden."
                 )
                 if saved_middle.button("Use saved API credentials", width="stretch"):
                     st.session_state.login_api_key = saved_credentials["api_key"]
                     st.session_state.login_api_secret = saved_credentials["api_secret"]
                     st.session_state.api_key = saved_credentials["api_key"]
                     st.rerun()
-                if saved_right.button("Forget saved credentials", width="stretch"):
+                if saved_right.button(
+                    "Forget saved credentials",
+                    width="stretch",
+                    disabled=_is_cloud_runtime(),
+                    help="Cloud secrets are managed in Azure." if _is_cloud_runtime() else None,
+                ):
                     try:
                         _clear_login_credentials()
                         st.session_state.login_api_key = ""
@@ -1050,20 +1231,25 @@ def main() -> None:
 
             remember_credentials = st.checkbox(
                 "Remember API key and API secret securely on this computer",
-                value=True,
-                help="Stores them in Windows Credential Manager, not in the project files.",
+                value=not _is_cloud_runtime(),
+                disabled=_is_cloud_runtime(),
+                help=(
+                    "Cloud credentials come from secret-backed environment variables."
+                    if _is_cloud_runtime()
+                    else "Stores them in Windows Credential Manager, not in the project files."
+                ),
             )
 
             b1, b2 = st.columns(2)
             with b1:
-                if st.button("Generate Login Link", use_container_width=True):
+                if st.button("Generate Login Link", width="stretch"):
                     if not api_key.strip():
                         st.error("Paste API key first.")
                     else:
                         st.session_state.login_url = build_kite_login_url(api_key.strip())
                         st.session_state.api_key = api_key.strip()
             with b2:
-                if st.button("Connect", use_container_width=True):
+                if st.button("Connect", width="stretch"):
                     try:
                         if not api_key.strip() or not api_secret.strip() or not request_token.strip():
                             raise ValueError("API key, API secret, and request token are required.")
@@ -1091,7 +1277,7 @@ def main() -> None:
                         st.error(f"Connection failure: {type(error).__name__}: {error}")
 
             if st.session_state.login_url:
-                st.link_button("Open Zerodha Login Page", st.session_state.login_url, use_container_width=True)
+                st.link_button("Open Zerodha Login Page", st.session_state.login_url, width="stretch")
 
             st.info("Connection status: NOT CONNECTED")
 
@@ -1102,27 +1288,49 @@ def main() -> None:
         sensex_enabled = bool(st.session_state.engine_state["SENSEX"].get("enabled", True))
 
         with c1:
-            if st.button("Start NIFTY trade logic", use_container_width=True):
+            if st.button(
+                "Start NIFTY trade logic",
+                width="stretch",
+                disabled=bool(st.session_state.engine_state["NIFTY"].get("reconciliation_required")),
+            ):
                 st.session_state.engine_state["NIFTY"]["enabled"] = True
                 st.session_state.nifty_turn_off = False
                 nifty_enabled = True
         with c2:
-            if st.button("Start SENSEX trade logic", use_container_width=True):
+            if st.button(
+                "Start SENSEX trade logic",
+                width="stretch",
+                disabled=bool(st.session_state.engine_state["SENSEX"].get("reconciliation_required")),
+            ):
                 st.session_state.engine_state["SENSEX"]["enabled"] = True
                 st.session_state.sensex_turn_off = False
                 sensex_enabled = True
         with c3:
-            if st.button("Refresh now", use_container_width=True):
+            if st.button("Refresh now", width="stretch"):
                 st.rerun()
 
         o1, o2 = st.columns(2)
         with o1:
-            nifty_turn_off = st.toggle("Turn OFF NIFTY", key="nifty_turn_off")
+            nifty_turn_off = st.toggle(
+                "Turn OFF NIFTY",
+                key="nifty_turn_off",
+                disabled=bool(st.session_state.engine_state["NIFTY"].get("reconciliation_required")),
+            )
         with o2:
-            sensex_turn_off = st.toggle("Turn OFF SENSEX", key="sensex_turn_off")
+            sensex_turn_off = st.toggle(
+                "Turn OFF SENSEX",
+                key="sensex_turn_off",
+                disabled=bool(st.session_state.engine_state["SENSEX"].get("reconciliation_required")),
+            )
 
-        st.session_state.engine_state["NIFTY"]["enabled"] = not nifty_turn_off
-        st.session_state.engine_state["SENSEX"]["enabled"] = not sensex_turn_off
+        st.session_state.engine_state["NIFTY"]["enabled"] = (
+            not nifty_turn_off
+            and not bool(st.session_state.engine_state["NIFTY"].get("reconciliation_required"))
+        )
+        st.session_state.engine_state["SENSEX"]["enabled"] = (
+            not sensex_turn_off
+            and not bool(st.session_state.engine_state["SENSEX"].get("reconciliation_required"))
+        )
         n_status = "RUNNING" if st.session_state.engine_state["NIFTY"]["enabled"] else "OFF"
         s_status = "RUNNING" if st.session_state.engine_state["SENSEX"]["enabled"] else "OFF"
         st.caption(f"Trade logic status -> NIFTY: {n_status} | SENSEX: {s_status}")
@@ -1133,14 +1341,55 @@ def main() -> None:
                 st.session_state.engine_state["NIFTY"]["enabled"] = False
                 st.session_state.engine_state["NIFTY"]["hard_stop_requested"] = True
                 st.session_state.nifty_turn_off = True
+                _persist_engine_state(st.session_state.engine_state)
                 st.rerun()
         with hard_sensex:
             if st.button("Hard stop SENSEX", type="primary", width="stretch"):
                 st.session_state.engine_state["SENSEX"]["enabled"] = False
                 st.session_state.engine_state["SENSEX"]["hard_stop_requested"] = True
                 st.session_state.sensex_turn_off = True
+                _persist_engine_state(st.session_state.engine_state)
                 st.rerun()
         st.caption("Hard stop closes that index's open position and keeps only that index OFF. REAL exits require REAL confirmation to remain armed.")
+
+        reconciliation_required = any(
+            bool(state.get("reconciliation_required"))
+            for state in st.session_state.engine_state.values()
+        )
+        recovery_saved_at = st.session_state.recovery_metadata.get("saved_at", "")
+        if reconciliation_required:
+            st.error(
+                "Recovered broker activity is unverified. Trade logic is OFF until a manual broker reconciliation matches."
+            )
+        elif recovery_saved_at:
+            st.caption(f"Durable state restored from {recovery_saved_at}.")
+
+        if st.button(
+            "Reconcile recovered state with Zerodha",
+            icon=":material/sync:",
+            width="stretch",
+            disabled=not st.session_state.connected,
+        ):
+            try:
+                reconciliation_kite = _get_kite(st.session_state.api_key, st.session_state.access_token)
+                report = _reconcile_engine_state_with_broker(
+                    reconciliation_kite,
+                    st.session_state.engine_state,
+                )
+                st.session_state.reconciliation_report = report
+                _persist_engine_state(st.session_state.engine_state)
+                st.rerun()
+            except Exception as error:
+                st.error(f"Broker reconciliation failed: {type(error).__name__}: {error}")
+
+        report = st.session_state.reconciliation_report
+        if isinstance(report, dict):
+            if report.get("status") == "MATCHED":
+                st.success(
+                    f"Broker reconciliation matched ({len(report.get('checked_order_ids', []))} order IDs checked)."
+                )
+            else:
+                st.error("Broker reconciliation mismatch: " + "; ".join(report.get("issues", [])))
 
         mode_col, arm_col = st.columns([1.2, 2.0])
         with mode_col:
@@ -1158,7 +1407,11 @@ def main() -> None:
             )
 
         if trade_mode == "REAL":
-            if real_mode_armed:
+            if _is_cloud_runtime():
+                st.error("REAL mode is unavailable in cloud deployments. Use a supervised local session after reconciliation.")
+            elif reconciliation_required:
+                st.error("REAL mode remains blocked until broker reconciliation succeeds.")
+            elif real_mode_armed:
                 st.warning("REAL mode armed: new ENTRY/EXIT signals will place live market orders.")
             else:
                 st.info("REAL mode selected but not armed. Signals will be logged, but no live order is placed.")
@@ -1206,13 +1459,27 @@ def main() -> None:
 
         _, reset_column, _ = st.columns(3)
         with reset_column:
-            if st.button("Reset In-Memory Trade State", use_container_width=True):
+            has_real_recovery = any(
+                bool(state.get("reconciliation_required"))
+                or (
+                    isinstance(state.get("open_trade"), dict)
+                    and str(state["open_trade"].get("trade_mode", "PAPER")).upper() == "REAL"
+                )
+                for state in st.session_state.engine_state.values()
+            )
+            if st.button(
+                "Reset durable PAPER trade state",
+                width="stretch",
+                disabled=has_real_recovery,
+                help="Reconcile broker activity before resetting recovered REAL state." if has_real_recovery else None,
+            ):
                 st.session_state.engine_state = {
                     name: _default_state_for(cfg) for name, cfg in UNDERLYINGS.items()
                 }
                 st.session_state.nifty_turn_off = False
                 st.session_state.sensex_turn_off = False
-                st.success("Engine state reset for NIFTY and SENSEX.")
+                _persist_engine_state(st.session_state.engine_state)
+                st.success("Durable PAPER engine state reset for NIFTY and SENSEX.")
 
         with st.expander("Trailing stop settings", expanded=True):
             for name in UNDERLYINGS:
@@ -1267,7 +1534,16 @@ def main() -> None:
                 else:
                     st.caption(f"Edit the {name} values, then press Save {name} settings to apply them.")
 
-    _render_live_engine(str(trade_mode), bool(real_mode_armed), expiry_week_offset)
+    _persist_engine_state(st.session_state.engine_state)
+    effective_real_mode_armed = (
+        bool(real_mode_armed)
+        and not _is_cloud_runtime()
+        and not any(
+            bool(state.get("reconciliation_required"))
+            for state in st.session_state.engine_state.values()
+        )
+    )
+    _render_live_engine(str(trade_mode), effective_real_mode_armed, expiry_week_offset)
 
 
 if __name__ == "__main__":
