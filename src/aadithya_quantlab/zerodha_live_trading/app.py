@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import calendar
 from dataclasses import dataclass
-from datetime import datetime, time as wall_time, timedelta
+from datetime import date, datetime, time as wall_time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -13,12 +14,24 @@ import streamlit as st
 from kiteconnect import KiteConnect
 
 from aadithya_quantlab.trading.zerodha import build_kite_login_url
+from aadithya_quantlab.zerodha_live_trading.auth import (
+    AuthenticationService,
+    ClientContext,
+    resolve_client_context,
+)
+from aadithya_quantlab.zerodha_live_trading.database import Database
 from aadithya_quantlab.zerodha_live_trading.persistence import (
     load_daily_connection,
     load_engine_state,
     runtime_path,
     save_daily_connection,
     save_engine_state,
+)
+from aadithya_quantlab.zerodha_live_trading.pnl import (
+    PnlThresholds,
+    calendar_html,
+    month_bounds,
+    monthly_summary,
 )
 
 
@@ -29,6 +42,16 @@ TRADING_STATE_PATH = runtime_path("streamlit_dashboard_state.json")
 CREDENTIAL_SERVICE_NAME = "aadithya-zerodha-live-trading"
 API_KEY_ACCOUNT = "api-key"
 API_SECRET_ACCOUNT = "api-secret"
+
+
+@st.cache_resource
+def _database() -> Database:
+    return Database()
+
+
+@st.cache_resource
+def _authentication() -> AuthenticationService:
+    return AuthenticationService(_database())
 
 
 @dataclass(frozen=True)
@@ -698,6 +721,58 @@ def _push_event(engine: dict[str, Any], text: str) -> None:
         del events[:-20]
 
 
+def _persist_open_trade(cfg: UnderlyingConfig, open_trade: dict[str, Any]) -> None:
+    entry_time = str(open_trade["entry_time"])
+    entry_order_id = str(open_trade.get("entry_order_id", ""))
+    mode = str(open_trade.get("trade_mode", "PAPER")).upper()
+    trade_key = (
+        f"REAL:{entry_order_id}"
+        if mode == "REAL" and entry_order_id
+        else f"PAPER:{cfg.name}:{open_trade['instrument']}:{entry_time}"
+    )
+    trade_id = _database().upsert_open_trade(
+        {
+            "trade_key": trade_key,
+            "trade_date": datetime.fromisoformat(entry_time).date().isoformat(),
+            "mode": mode,
+            "underlying": cfg.name,
+            "option_symbol": str(open_trade["instrument"]),
+            "side": str(open_trade["side"]),
+            "quantity": int(open_trade["quantity"]),
+            "entry_time": entry_time,
+            "entry_price": _to_float(open_trade["entry_option"]),
+            "entry_order_id": entry_order_id or None,
+        }
+    )
+    open_trade["persistent_trade_id"] = trade_id
+    open_trade["trade_key"] = trade_key
+
+
+def _complete_persistent_trade(
+    cfg: UnderlyingConfig,
+    open_trade: dict[str, Any],
+    *,
+    exit_price: float,
+    realized_pnl: float,
+    exit_reason: str,
+    exit_time: datetime,
+) -> None:
+    if not open_trade.get("persistent_trade_id"):
+        # Older recovery JSON and tests may predate persistent trade fields.
+        open_trade.setdefault("entry_time", str(open_trade.get("signal_time") or exit_time.isoformat()))
+        open_trade.setdefault("side", "CALL" if str(open_trade.get("instrument", "")).endswith("CE") else "PUT")
+        open_trade.setdefault("entry_order_id", "PAPER" if str(open_trade.get("trade_mode", "PAPER")).upper() == "PAPER" else "")
+        _persist_open_trade(cfg, open_trade)
+    _database().complete_trade(
+        int(open_trade["persistent_trade_id"]),
+        exit_time=exit_time.isoformat(),
+        exit_price=exit_price,
+        realized_pnl=realized_pnl,
+        exit_order_id=str(open_trade.get("exit_order_id") or "") or None,
+        exit_reason=exit_reason,
+    )
+
+
 def _entries_blocked_for_expiry_day(
     current_weekday: int,
     expiry_weekday: int,
@@ -838,6 +913,10 @@ def _run_engine_for(
             if not _try_exit_live_if_needed("HARD_STOP"):
                 return engine
             pnl = (ltp - entry) * qty
+            _complete_persistent_trade(
+                cfg, open_trade, exit_price=ltp, realized_pnl=pnl,
+                exit_reason="HARD_STOP", exit_time=now_ist,
+            )
             engine["realized_pnl"] = _to_float(engine.get("realized_pnl"), 0.0) + pnl
             engine["trades_taken"] = int(engine.get("trades_taken", 0)) + 1
             _push_event(engine, f"{cfg.name} EXIT HARD_STOP {open_trade['instrument']} pnl={pnl:.2f}")
@@ -849,6 +928,10 @@ def _run_engine_for(
             if not _try_exit_live_if_needed("STOP_LOSS"):
                 return engine
             pnl = (stop - entry) * qty
+            _complete_persistent_trade(
+                cfg, open_trade, exit_price=stop, realized_pnl=pnl,
+                exit_reason="STOP_LOSS", exit_time=now_ist,
+            )
             engine["realized_pnl"] = _to_float(engine.get("realized_pnl"), 0.0) + pnl
             engine["trades_taken"] = int(engine.get("trades_taken", 0)) + 1
             _push_event(engine, f"{cfg.name} EXIT STOP_LOSS {open_trade['instrument']} pnl={pnl:.2f}")
@@ -857,6 +940,10 @@ def _run_engine_for(
             if not _try_exit_live_if_needed("EOD_CLOSE"):
                 return engine
             pnl = (ltp - entry) * qty
+            _complete_persistent_trade(
+                cfg, open_trade, exit_price=ltp, realized_pnl=pnl,
+                exit_reason="EOD_CLOSE", exit_time=now_ist,
+            )
             engine["realized_pnl"] = _to_float(engine.get("realized_pnl"), 0.0) + pnl
             engine["trades_taken"] = int(engine.get("trades_taken", 0)) + 1
             _push_event(engine, f"{cfg.name} EXIT EOD_CLOSE {open_trade['instrument']} pnl={pnl:.2f}")
@@ -973,6 +1060,7 @@ def _run_engine_for(
         "entry_order_id": entry_order_id,
         "trade_mode": trade_mode,
     }
+    _persist_open_trade(cfg, engine["open_trade"])
     engine["last_signal_ts"] = signal_iso
     engine["entry_status"] = f"Position opened from {side} crossover"
     _push_event(
@@ -1049,6 +1137,10 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
 
 @st.fragment(run_every=3, parallel=True)
 def _render_live_engine(trade_mode: str, real_mode_armed: bool, expiry_week_offset: int) -> None:
+    token = st.session_state.get("dashboard_session_token")
+    if not _authentication().validate_session(token, touch=False):
+        st.session_state.pop("dashboard_session_token", None)
+        st.rerun(scope="app")
     with st.container(border=True):
         st.subheader(":material/monitoring: 3) Live market and trade engine")
         entry_start = _parse_hhmm("09:16")
@@ -1154,10 +1246,251 @@ def _init_session_state() -> None:
                 _clear_saved_connection()
 
 
+def _client_context() -> ClientContext:
+    try:
+        headers = dict(st.context.headers)
+    except Exception:
+        headers = {}
+    return resolve_client_context(
+        headers,
+        trust_proxy_headers=_env_flag("ZERODHA_TRUST_PROXY_HEADERS"),
+    )
+
+
+def _require_dashboard_login() -> dict[str, object]:
+    auth = _authentication()
+    try:
+        auth.bootstrap_owner_from_environment()
+    except ValueError as error:
+        st.error(f"OWNER bootstrap configuration error: {error}")
+        st.stop()
+    token = st.session_state.get("dashboard_session_token")
+    session = auth.validate_session(token)
+    if session:
+        return session
+
+    st.session_state.pop("dashboard_session_token", None)
+    st.markdown("## :material/lock: Dashboard sign in")
+    if not _database().owner_exists():
+        st.error(
+            "No OWNER account exists. Set ZERODHA_OWNER_USERNAME and ZERODHA_OWNER_PASSWORD "
+            "in the runtime environment, then restart once to bootstrap the owner securely."
+        )
+        st.stop()
+
+    with st.form("dashboard_login", clear_on_submit=True):
+        username = st.text_input("Username or email")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", icon=":material/login:", width="stretch")
+    if submitted:
+        new_token = auth.login(username, password, _client_context())
+        if new_token:
+            st.session_state.dashboard_session_token = new_token
+            st.rerun()
+        st.error("Sign-in failed or temporarily rate-limited.")
+    st.caption("Sessions expire after 30 minutes idle or 12 hours absolute time.")
+    st.stop()
+
+
+def _format_inr(value: object) -> str:
+    return f"₹{_to_float(value):,.2f}"
+
+
+def _render_positions_page() -> None:
+    st.markdown("## :material/account_balance_wallet: Positions")
+    for name in UNDERLYINGS:
+        state = st.session_state.engine_state[name]
+        open_trade = state.get("open_trade")
+        with st.container(border=True):
+            st.subheader(name)
+            if not isinstance(open_trade, dict) or not open_trade:
+                st.info("No open position")
+                continue
+            with st.container(horizontal=True):
+                st.metric("Symbol", str(open_trade.get("instrument", "")), border=True)
+                st.metric("Quantity", int(open_trade.get("quantity", 0)), border=True)
+                st.metric("Entry", _format_inr(open_trade.get("entry_option")), border=True)
+                st.metric("LTP", _format_inr(open_trade.get("ltp")), border=True)
+                st.metric("Unrealized P&L", _format_inr(open_trade.get("unrealized")), border=True)
+            st.caption(f"Mode: {open_trade.get('trade_mode', 'PAPER')} · Entry: {open_trade.get('entry_time', '')}")
+
+
+def _safe_trade_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    columns = [
+        "trade_date", "mode", "underlying", "option_symbol", "side", "quantity",
+        "entry_time", "exit_time", "entry_price", "exit_price", "realized_pnl", "exit_reason",
+    ]
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows)[columns]
+
+
+def _render_trade_history_page() -> None:
+    st.markdown("## :material/history: Trade history")
+    left, middle, right = st.columns(3)
+    start = left.date_input("From", value=date.today().replace(day=1), key="history_start")
+    end = middle.date_input("To", value=date.today(), key="history_end")
+    mode = right.segmented_control("Mode", ["All", "PAPER", "REAL"], default="All", key="history_mode")
+    underlying = st.segmented_control(
+        "Underlying", ["All", "NIFTY", "SENSEX"], default="All", key="history_underlying"
+    )
+    rows = _database().list_trades(
+        start_date=start.isoformat(), end_date=end.isoformat(), mode=str(mode), underlying=str(underlying)
+    )
+    frame = _safe_trade_frame(rows)
+    st.dataframe(
+        frame,
+        hide_index=True,
+        column_config={
+            "entry_price": st.column_config.NumberColumn("Entry price", format="₹%.2f"),
+            "exit_price": st.column_config.NumberColumn("Exit price", format="₹%.2f"),
+            "realized_pnl": st.column_config.NumberColumn("Realized P&L", format="₹%.2f"),
+        },
+    )
+
+
+def _load_thresholds() -> PnlThresholds:
+    database = _database()
+    return PnlThresholds(
+        strong_profit=float(database.get_setting("pnl_strong_profit", "3000")),
+        strong_loss=float(database.get_setting("pnl_strong_loss", "-3000")),
+    )
+
+
+def _render_pnl_calendar_page() -> None:
+    st.markdown("## :material/calendar_month: P&L calendar")
+    today = date.today()
+    c1, c2, c3, c4 = st.columns(4)
+    month = c1.selectbox("Month", list(range(1, 13)), index=today.month - 1, format_func=lambda value: calendar.month_name[value])
+    year = int(c2.number_input("Year", min_value=2020, max_value=2100, value=today.year, step=1))
+    mode = c3.segmented_control("Mode", ["All", "PAPER", "REAL"], default="All", key="calendar_mode")
+    underlying = c4.segmented_control("Underlying", ["All", "NIFTY", "SENSEX"], default="All", key="calendar_underlying")
+    start, end = month_bounds(year, int(month))
+    rows = _database().daily_pnl(start.isoformat(), end.isoformat(), str(mode), str(underlying))
+    thresholds = _load_thresholds()
+    summary = monthly_summary(rows, year, int(month))
+
+    with st.container(horizontal=True):
+        st.metric("Net P&L", _format_inr(summary["net_pnl"]), border=True)
+        st.metric("Trading days", summary["trading_days"], border=True)
+        st.metric("Profit / loss days", f"{summary['profit_days']} / {summary['loss_days']}", border=True)
+        st.metric("No-trade days", summary["no_trade_days"], border=True)
+        st.metric("Win rate", f"{summary['win_rate']:.1f}%", border=True)
+    with st.container(horizontal=True):
+        best = summary["best_day"] or {}
+        worst = summary["worst_day"] or {}
+        st.metric("Best day", f"{best.get('trade_date', '—')} · {_format_inr(best.get('total_pnl', 0))}", border=True)
+        st.metric("Worst day", f"{worst.get('trade_date', '—')} · {_format_inr(worst.get('total_pnl', 0))}", border=True)
+        st.metric("Total trades", summary["total_trades"], border=True)
+        st.metric("Winning / losing", f"{summary['winning_trades']} / {summary['losing_trades']}", border=True)
+
+    st.html(calendar_html(year, int(month), rows, thresholds))
+    selected = st.date_input("Select a date for trade details", value=start, min_value=start, max_value=end)
+    selected_rows = _database().list_trades(
+        start_date=selected.isoformat(), end_date=selected.isoformat(), mode=str(mode), underlying=str(underlying)
+    )
+    selected_daily = next((row for row in rows if row["trade_date"] == selected.isoformat()), {})
+    count = int(selected_daily.get("trade_count", 0))
+    wins = int(selected_daily.get("winning_trades", 0))
+    with st.container(horizontal=True):
+        st.metric("Total P&L", _format_inr(selected_daily.get("total_pnl")), border=True)
+        st.metric("NIFTY P&L", _format_inr(selected_daily.get("nifty_pnl")), border=True)
+        st.metric("SENSEX P&L", _format_inr(selected_daily.get("sensex_pnl")), border=True)
+        st.metric("Trades", count, border=True)
+        st.metric("Wins / losses", f"{wins} / {int(selected_daily.get('losing_trades', 0))}", border=True)
+        st.metric("Win rate", f"{(wins / count * 100.0) if count else 0.0:.1f}%", border=True)
+    st.dataframe(
+        _safe_trade_frame(selected_rows), hide_index=True,
+        column_config={"entry_price": st.column_config.NumberColumn(format="₹%.2f"), "exit_price": st.column_config.NumberColumn(format="₹%.2f"), "realized_pnl": st.column_config.NumberColumn(format="₹%.2f")},
+    )
+
+
+def _render_security_page(session: dict[str, object]) -> None:
+    _authentication().require_owner(session)
+    st.markdown("## :material/security: Security")
+    sessions = _database().active_sessions()
+    st.metric("Active sessions", len(sessions), border=True)
+    for item in sessions:
+        is_current = item["session_id"] == session["session_id"]
+        with st.container(border=True):
+            st.markdown(f"**{item['username']}** {'· Current session' if is_current else ''}")
+            st.write(
+                f"Login: {item['created_at']} · Last activity: {item['last_activity']} · "
+                f"Approx. location: {item.get('city') or 'Unavailable'}, {item.get('region') or 'Unavailable'}, {item.get('country') or 'Unavailable'}"
+            )
+            st.caption(
+                f"IP: {item.get('ip_address') or 'Unavailable'} · {item.get('browser') or 'Unavailable'} · "
+                f"{item.get('operating_system') or 'Unavailable'} · {item.get('device_type') or 'Unavailable'} · Active"
+            )
+            if st.button("Terminate session", key=f"revoke_{item['session_id'][:12]}", disabled=is_current):
+                _authentication().revoke_session(session, str(item["session_id"]))
+                st.rerun()
+    if st.button("Terminate all other sessions", type="primary"):
+        count = _authentication().revoke_all_other_sessions(session)
+        st.success(f"Terminated {count} other session(s).")
+    st.subheader("Security audit log")
+    st.dataframe(pd.DataFrame(_database().security_events()), hide_index=True)
+
+
+def _render_settings_page(session: dict[str, object]) -> None:
+    _authentication().require_owner(session)
+    st.markdown("## :material/settings: Owner settings")
+    thresholds = _load_thresholds()
+    with st.form("pnl_thresholds"):
+        strong_profit = st.number_input("Strong profit threshold (INR)", min_value=0.01, value=thresholds.strong_profit)
+        strong_loss_magnitude = st.number_input("Strong loss threshold magnitude (INR)", min_value=0.01, value=abs(thresholds.strong_loss))
+        save_thresholds = st.form_submit_button("Save P&L thresholds")
+    if save_thresholds:
+        _database().set_setting("pnl_strong_profit", str(float(strong_profit)), int(session["user_id"]))
+        _database().set_setting("pnl_strong_loss", str(-float(strong_loss_magnitude)), int(session["user_id"]))
+        _database().log_security_event("PNL_THRESHOLDS_CHANGED", user_id=int(session["user_id"]))
+        st.success("P&L thresholds saved.")
+
+    with st.form("owner_password_change", clear_on_submit=True):
+        current = st.text_input("Current password", type="password")
+        new = st.text_input("New password", type="password")
+        confirmation = st.text_input("Confirm new password", type="password")
+        change_password = st.form_submit_button("Change owner password", type="primary")
+    if change_password:
+        try:
+            revoked = _authentication().change_owner_password(session, current, new, confirmation)
+            st.success(f"Password changed. {revoked} other session(s) invalidated.")
+        except ValueError as error:
+            st.error(str(error))
+
+
 def main() -> None:
     st.set_page_config(page_title="Zerodha live trade control", page_icon=":material/monitoring:", layout="wide")
-    _init_session_state()
     _apply_visual_style()
+    session = _require_dashboard_login()
+    _init_session_state()
+
+    pages = ["Dashboard / Live trading", "Positions", "Trade history", "P&L calendar"]
+    if str(session.get("role", "")).upper() == "OWNER":
+        pages.extend(["Security", "Settings"])
+    with st.sidebar:
+        st.caption(f"Signed in as {session['username']} · {session['role']}")
+        selected_page = st.radio("Navigation", pages, key="dashboard_navigation")
+        if st.button("Log out", icon=":material/logout:", width="stretch"):
+            _authentication().logout(str(st.session_state.dashboard_session_token), _client_context())
+            st.session_state.pop("dashboard_session_token", None)
+            st.rerun()
+
+    if selected_page == "Positions":
+        _render_positions_page()
+        return
+    if selected_page == "Trade history":
+        _render_trade_history_page()
+        return
+    if selected_page == "P&L calendar":
+        _render_pnl_calendar_page()
+        return
+    if selected_page == "Security":
+        _render_security_page(session)
+        return
+    if selected_page == "Settings":
+        _render_settings_page(session)
+        return
 
     st.markdown("## :material/candlestick_chart: Zerodha live trade control center")
     if _is_cloud_runtime():

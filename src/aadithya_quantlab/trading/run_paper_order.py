@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict
+from pathlib import Path
 
-from kite_gateway import OrderRequest, Settings, create_broker
+from kite_gateway import OrderRequest, Settings, TradingMode, create_broker
+from aadithya_quantlab.trading.paper import PaperLedger, PaperOrder
 from aadithya_quantlab.trading.zerodha import NIFTY_PAPER_QUANTITY, SENSEX_PAPER_QUANTITY
 
 _UNDERLYING_MAP = {
@@ -30,7 +32,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--side", required=True, choices=("BUY", "SELL"))
     parser.add_argument(
         "--underlying",
-        required=True,
         choices=tuple(_UNDERLYING_MAP),
         help="NIFTY (qty=65, NFO) or SENSEX (qty=20, BFO).",
     )
@@ -42,12 +43,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--price", type=float, help="Limit price; omit for MARKET order.")
     parser.add_argument("--tag", default="apexpaper", help="Order tag (alphanumeric, max 20 chars).")
+    parser.add_argument("--qty", type=int, help="Backward-compatible explicit quantity (one supported lot).")
+    parser.add_argument("--ledger", type=Path, help="Optional append-only CSV ledger for PAPER mode.")
     args = parser.parse_args(argv)
 
-    cfg = _UNDERLYING_MAP[args.underlying]
-    quantity = cfg["quantity"] * args.lots
+    underlying = args.underlying or next(
+        (name for name in _UNDERLYING_MAP if args.symbol.upper().startswith(name)), None
+    )
+    if not underlying:
+        parser.error("--underlying is required when it cannot be inferred from --symbol")
+    cfg = _UNDERLYING_MAP[underlying]
+    quantity = int(args.qty) if args.qty is not None else cfg["quantity"] * args.lots
+    if args.qty is not None and quantity != cfg["quantity"]:
+        parser.error(f"--qty must equal one {underlying} lot ({cfg['quantity']})")
 
     settings = Settings.from_env()
+    if args.ledger and settings.mode is not TradingMode.PAPER:
+        parser.error("--ledger is available only in PAPER mode")
     broker = create_broker(settings)
 
     result = broker.place_order(
@@ -63,6 +75,19 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
+    if args.ledger:
+        PaperLedger(args.ledger).record_order(
+            PaperOrder(
+                tradingsymbol=args.symbol,
+                exchange=cfg["exchange"],
+                transaction_type=args.side,
+                quantity=quantity,
+                order_type="MARKET" if args.price is None else "LIMIT",
+                price=args.price,
+                tag=args.tag,
+            )
+        )
+
     print(json.dumps(asdict(result), indent=2, default=str))
     print(
         f"\n[{settings.mode.value}] {result.status}  "
@@ -73,4 +98,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -63,12 +63,15 @@ docker run --rm -p 8501:8501 `
   --env ZERODHA_CLOUD_MODE=true `
   --env ZERODHA_API_KEY=$env:ZERODHA_API_KEY `
   --env ZERODHA_API_SECRET=$env:ZERODHA_API_SECRET `
+  --env ZERODHA_OWNER_USERNAME=$env:ZERODHA_OWNER_USERNAME `
+  --env ZERODHA_OWNER_PASSWORD=$env:ZERODHA_OWNER_PASSWORD `
   zerodha-dashboard:local
 ```
 
 Open `http://localhost:8501`. The named Docker volume stores today's access
-token and `streamlit_dashboard_state.json`; removing the container does not
-remove that volume. The API key and API secret remain environment variables.
+token, `streamlit_dashboard_state.json`, and `quantlab.db`; removing the
+container does not remove that volume. The API key, API secret, and owner
+bootstrap password remain environment variables.
 For a local Windows run without Docker, the dashboard still falls back to
 Windows Credential Manager when those environment variables are absent.
 
@@ -119,14 +122,54 @@ Remove-Variable StorageKey
 ```
 
 The mounted `/mnt/zerodha` directory contains the daily access-token envelope,
-risk settings, and durable engine state. Azure Storage encrypts the share at
+risk settings, durable engine state, and `quantlab.db`. Azure Storage encrypts the share at
 rest. Restrict Storage Account network access and enable backup/retention to
 match your recovery requirements.
+
+### Dashboard owner authentication and persistent history
+
+The dashboard is closed until an OWNER account exists. On the first start only,
+set `ZERODHA_OWNER_USERNAME` and `ZERODHA_OWNER_PASSWORD` in the runtime secret
+store. The password must be at least 12 characters and is stored only as an
+Argon2id hash in SQLite. Once the owner exists, later starts ignore these
+bootstrap values; remove the plaintext bootstrap password from the runtime
+environment after confirming the first login.
+
+Dashboard sessions are server-side records backed by `quantlab.db`, with a
+30-minute idle timeout and 12-hour absolute timeout. Revoked sessions are denied
+on the next Streamlit rerun. The Security page labels browser records as
+sessions because they do not prove a unique physical device. OWNER can inspect
+and revoke sessions, review audit events, change the owner password, and change
+the calendar's strong-profit/strong-loss thresholds. Changing the owner
+password keeps the current session and revokes all other owner sessions.
+
+`quantlab.db` is stored at `/mnt/zerodha/quantlab.db` in the container and
+`outputs/zerodha/quantlab.db` locally (or under `ZERODHA_DATA_DIR`). It contains
+users, hashed passwords, sessions, security events, idempotent trade history,
+daily P&L, and owner settings. Back it up from a stopped container, or use
+SQLite's online backup tooling while the app is running; copy the database plus
+its `-wal` and `-shm` files together if taking a filesystem-level live copy.
+Protect backups as security-sensitive data.
+
+The P&L calendar supports month/year, PAPER/REAL, and underlying filters. Its
+default strong colors begin at +₹3,000 and -₹3,000 and are owner-configurable.
+Selecting a date shows NIFTY/SENSEX totals and each completed trade. Approximate
+location is derived from network IP metadata, not GPS, and may be unavailable or
+incorrect. Forwarded IP headers are ignored unless
+`ZERODHA_TRUST_PROXY_HEADERS=true`; enable that only behind a trusted proxy that
+overwrites client-supplied forwarding headers. No external geolocation provider
+is enabled by default, so country/region/city gracefully display as unavailable.
+
+For a local Docker verification, set the four required secrets in the current
+PowerShell process, run the build/run commands above, sign in, create only PAPER
+activity, restart the container against the same named volume, and confirm that
+Trade history, the P&L calendar, and Security sessions persist. Never put these
+values in the Dockerfile, Compose files, shell history, or source control.
 
 ### API credentials in Key Vault
 
 Create a user-assigned identity for image pulls and Key Vault reads. Enter the
-two Zerodha values only at the prompt; they are never written into this
+Zerodha credentials and one-time owner bootstrap values only at the prompt; they are never written into this
 repository. The request token and daily access token must not be stored in
 source control.
 
@@ -147,7 +190,12 @@ $ZerodhaApiKey = Read-Host "ZERODHA_API_KEY"
 $ZerodhaApiSecret = Read-Host "ZERODHA_API_SECRET"
 az keyvault secret set --vault-name $KeyVaultName --name zerodha-api-key --value $ZerodhaApiKey --output none
 az keyvault secret set --vault-name $KeyVaultName --name zerodha-api-secret --value $ZerodhaApiSecret --output none
-Remove-Variable ZerodhaApiKey, ZerodhaApiSecret
+$OwnerUsername = Read-Host "ZERODHA_OWNER_USERNAME"
+$OwnerPassword = Read-Host "ZERODHA_OWNER_PASSWORD" -AsSecureString
+$OwnerPasswordPlain = [System.Net.NetworkCredential]::new('', $OwnerPassword).Password
+az keyvault secret set --vault-name $KeyVaultName --name zerodha-owner-username --value $OwnerUsername --output none
+az keyvault secret set --vault-name $KeyVaultName --name zerodha-owner-password --value $OwnerPasswordPlain --output none
+Remove-Variable ZerodhaApiKey, ZerodhaApiSecret, OwnerUsername, OwnerPassword, OwnerPasswordPlain
 ```
 
 ### Deploy the Container App

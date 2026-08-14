@@ -28,7 +28,7 @@ class FakeMarketDataClient:
     def get_historical_ohlc(self, symbol: str, interval: str, lookback_bars: int):
         del interval, lookback_bars
         assert symbol == "NIFTY"
-        market_day = date(2026, 7, 31)
+        market_day = date.today()
         start = datetime(market_day.year, market_day.month, market_day.day, 9, 15, tzinfo=IST)
         closes = [100.0] * 39 + [130.0]
         rows = []
@@ -66,13 +66,13 @@ class FakeMarketDataClient:
                 "symbol": "NIFTY26AUG100CE",
                 "option_type": "CE",
                 "strike": 100,
-                "expiry": "2026-08-06",
+                "expiry": (trade_date + timedelta(days=7)).isoformat(),
             },
             {
                 "symbol": "NIFTY26AUG100PE",
                 "option_type": "PE",
                 "strike": 100,
-                "expiry": "2026-08-06",
+                "expiry": (trade_date + timedelta(days=7)).isoformat(),
             },
         ]
 

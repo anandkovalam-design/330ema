@@ -9,6 +9,7 @@ dependencies = [
   "kiteconnect>=5.0.1",
   "streamlit>=1.60.0,<2",
   "keyring>=25.0",
+  "argon2-cffi>=23.1",
 ]
 
 [project.scripts]

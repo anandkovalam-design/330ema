@@ -24,6 +24,12 @@ properties:
       - name: zerodha-api-secret
         keyVaultUrl: https://<KEY_VAULT_NAME>.vault.azure.net/secrets/zerodha-api-secret
         identity: <USER_ASSIGNED_IDENTITY_RESOURCE_ID>
+      - name: zerodha-owner-username
+        keyVaultUrl: https://<KEY_VAULT_NAME>.vault.azure.net/secrets/zerodha-owner-username
+        identity: <USER_ASSIGNED_IDENTITY_RESOURCE_ID>
+      - name: zerodha-owner-password
+        keyVaultUrl: https://<KEY_VAULT_NAME>.vault.azure.net/secrets/zerodha-owner-password
+        identity: <USER_ASSIGNED_IDENTITY_RESOURCE_ID>
   template:
     containers:
       - name: zerodha-dashboard
@@ -40,6 +46,12 @@ properties:
             secretRef: zerodha-api-key
           - name: ZERODHA_API_SECRET
             secretRef: zerodha-api-secret
+          - name: ZERODHA_OWNER_USERNAME
+            secretRef: zerodha-owner-username
+          - name: ZERODHA_OWNER_PASSWORD
+            secretRef: zerodha-owner-password
+          - name: ZERODHA_TRUST_PROXY_HEADERS
+            value: "false"
           - name: ZERODHA_ALLOW_REAL_TRADING
             value: "false"
         volumeMounts:
