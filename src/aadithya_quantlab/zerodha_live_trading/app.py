@@ -1286,6 +1286,7 @@ def _require_dashboard_login() -> dict[str, object]:
         new_token = auth.login(username, password, _client_context())
         if new_token:
             st.session_state.dashboard_session_token = new_token
+            st.session_state.pop("dashboard_navigation", None)
             st.rerun()
         st.error("Sign-in failed or temporarily rate-limited.")
     st.caption("Sessions expire after 30 minutes idle or 12 hours absolute time.")
@@ -1408,6 +1409,47 @@ def _render_pnl_calendar_page() -> None:
 def _render_security_page(session: dict[str, object]) -> None:
     _authentication().require_owner(session)
     st.markdown("## :material/security: Security")
+    st.subheader("Viewer accounts")
+    st.caption("Viewers can monitor positions, trade history, and P&L, but cannot access trading controls or owner settings.")
+    with st.form("create_viewer", clear_on_submit=True):
+        viewer_username = st.text_input("Viewer username or email")
+        viewer_password = st.text_input("Viewer password", type="password")
+        viewer_confirmation = st.text_input("Confirm viewer password", type="password")
+        create_viewer = st.form_submit_button(
+            "Create viewer",
+            type="primary",
+            icon=":material/person_add:",
+        )
+    if create_viewer:
+        try:
+            _authentication().create_viewer(
+                session,
+                viewer_username,
+                viewer_password,
+                viewer_confirmation,
+            )
+            st.success(f"Viewer account {viewer_username.strip().lower()} created.")
+        except ValueError as error:
+            st.error(str(error))
+
+    viewers = _database().list_users("USER")
+    if not viewers:
+        st.info("No viewer accounts yet.")
+    for viewer in viewers:
+        active = bool(viewer["active"])
+        with st.container(border=True):
+            st.markdown(f"**{viewer['username']}** · {'Active' if active else 'Disabled'}")
+            st.caption(f"Created: {viewer['created_at']}")
+            action = "Disable access" if active else "Enable access"
+            if st.button(
+                action,
+                key=f"viewer_active_{viewer['id']}",
+                icon=":material/person_off:" if active else ":material/person_check:",
+            ):
+                _authentication().set_viewer_active(session, int(viewer["id"]), not active)
+                st.rerun()
+
+    st.subheader("Active sessions")
     sessions = _database().active_sessions()
     st.metric("Active sessions", len(sessions), border=True)
     for item in sessions:
@@ -1430,6 +1472,13 @@ def _render_security_page(session: dict[str, object]) -> None:
         st.success(f"Terminated {count} other session(s).")
     st.subheader("Security audit log")
     st.dataframe(pd.DataFrame(_database().security_events()), hide_index=True)
+
+
+def _navigation_pages_for_role(role: str) -> list[str]:
+    monitoring_pages = ["Positions", "Trade history", "P&L calendar"]
+    if role.upper() == "OWNER":
+        return ["Dashboard / Live trading", *monitoring_pages, "Security", "Settings"]
+    return monitoring_pages
 
 
 def _render_settings_page(session: dict[str, object]) -> None:
@@ -1465,15 +1514,16 @@ def main() -> None:
     session = _require_dashboard_login()
     _init_session_state()
 
-    pages = ["Dashboard / Live trading", "Positions", "Trade history", "P&L calendar"]
-    if str(session.get("role", "")).upper() == "OWNER":
-        pages.extend(["Security", "Settings"])
+    role = str(session.get("role", "")).upper()
+    pages = _navigation_pages_for_role(role)
     with st.sidebar:
-        st.caption(f"Signed in as {session['username']} · {session['role']}")
+        display_role = "VIEWER" if role == "USER" else role
+        st.caption(f"Signed in as {session['username']} · {display_role}")
         selected_page = st.radio("Navigation", pages, key="dashboard_navigation")
         if st.button("Log out", icon=":material/logout:", width="stretch"):
             _authentication().logout(str(st.session_state.dashboard_session_token), _client_context())
             st.session_state.pop("dashboard_session_token", None)
+            st.session_state.pop("dashboard_navigation", None)
             st.rerun()
 
     if selected_page == "Positions":

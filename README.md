@@ -143,6 +143,12 @@ and revoke sessions, review audit events, change the owner password, and change
 the calendar's strong-profit/strong-loss thresholds. Changing the owner
 password keeps the current session and revokes all other owner sessions.
 
+OWNER can also create and disable VIEWER accounts from the Security page.
+VIEWER credentials are stored as Argon2id hashes and provide read-only access to
+Positions, Trade history, and the P&L calendar. Viewers cannot access API login,
+trading controls, Security, or Settings. Disabling a viewer immediately revokes
+all of that viewer's active sessions.
+
 `quantlab.db` is stored at `/mnt/zerodha/quantlab.db` in the container and
 `outputs/zerodha/quantlab.db` locally (or under `ZERODHA_DATA_DIR`). It contains
 users, hashed passwords, sessions, security events, idempotent trade history,

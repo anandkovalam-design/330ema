@@ -12,6 +12,7 @@ from aadithya_quantlab.zerodha_live_trading.auth import (
     resolve_client_context,
     verify_password,
 )
+from aadithya_quantlab.zerodha_live_trading.app import _navigation_pages_for_role
 from aadithya_quantlab.zerodha_live_trading.database import Database
 from aadithya_quantlab.zerodha_live_trading.pnl import PnlThresholds, classify_pnl, monthly_summary
 
@@ -115,6 +116,67 @@ def test_owner_only_permissions_and_password_change_revokes_other_sessions(
     assert service.validate_session(other_token) is None
     assert service.login("owner@example.com", "A completely new password 2!", client)
     assert "PASSWORD_CHANGED" in [row["event_type"] for row in database.security_events()]
+
+
+def test_owner_can_create_and_disable_viewer(
+    owner: tuple[AuthenticationService, int], database: Database
+) -> None:
+    service, owner_id = owner
+    owner_session = {"role": "OWNER", "user_id": owner_id, "session_id": "owner-session"}
+
+    viewer_id = service.create_viewer(
+        owner_session,
+        "Viewer@Example.com",
+        "Viewer password 4!",
+        "Viewer password 4!",
+    )
+    token = service.login("viewer@example.com", "Viewer password 4!", ClientContext())
+
+    assert token
+    assert service.validate_session(token)["role"] == "USER"
+    assert database.list_users("USER")[0]["username"] == "viewer@example.com"
+    assert "password_hash" not in database.list_users("USER")[0]
+    assert _navigation_pages_for_role("USER") == ["Positions", "Trade history", "P&L calendar"]
+    assert "Security" in _navigation_pages_for_role("OWNER")
+
+    revoked = service.set_viewer_active(owner_session, viewer_id, False)
+    assert revoked == 1
+    assert service.validate_session(token) is None
+    assert service.login("viewer@example.com", "Viewer password 4!", ClientContext()) is None
+    assert service.set_viewer_active(owner_session, viewer_id, True) == 0
+    assert service.login("viewer@example.com", "Viewer password 4!", ClientContext())
+    assert {row["event_type"] for row in database.security_events()} >= {
+        "VIEWER_CREATED",
+        "VIEWER_DISABLED",
+        "VIEWER_ENABLED",
+    }
+
+
+def test_non_owner_cannot_create_or_enable_viewers(
+    owner: tuple[AuthenticationService, int], database: Database
+) -> None:
+    service, _ = owner
+    viewer_id = database.create_user("viewer@example.com", hash_password("Viewer password 4!"), "USER")
+    actor = {"role": "USER", "user_id": viewer_id, "session_id": "viewer-session"}
+
+    with pytest.raises(PermissionError):
+        service.create_viewer(actor, "other@example.com", "Another password 5!", "Another password 5!")
+    with pytest.raises(PermissionError):
+        service.set_viewer_active(actor, viewer_id, True)
+
+
+def test_viewer_creation_validates_confirmation_and_unique_username(
+    owner: tuple[AuthenticationService, int]
+) -> None:
+    service, owner_id = owner
+    actor = {"role": "OWNER", "user_id": owner_id, "session_id": "owner-session"}
+
+    with pytest.raises(ValueError, match="confirmation"):
+        service.create_viewer(actor, "viewer@example.com", "Viewer password 4!", "Different password 5!")
+
+    service.create_viewer(actor, "viewer@example.com", "Viewer password 4!", "Viewer password 4!")
+    with pytest.raises(ValueError, match="already exists"):
+        service.create_viewer(actor, "VIEWER@example.com", "Viewer password 4!", "Viewer password 4!")
 
 
 def _trade(key: str, underlying: str = "NIFTY", pnl_date: str = "2026-08-14") -> dict[str, object]:

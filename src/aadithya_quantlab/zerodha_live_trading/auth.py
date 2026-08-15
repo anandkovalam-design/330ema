@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
@@ -192,6 +193,46 @@ class AuthenticationService:
     def require_owner(session: Mapping[str, object]) -> None:
         if str(session.get("role", "")).upper() != "OWNER":
             raise PermissionError("OWNER role required.")
+
+    def create_viewer(
+        self,
+        actor: Mapping[str, object],
+        username: str,
+        password: str,
+        confirmation: str,
+    ) -> int:
+        self.require_owner(actor)
+        normalized_username = username.strip().lower()
+        if not normalized_username:
+            raise ValueError("Viewer username is required.")
+        if password != confirmation:
+            raise ValueError("Password and confirmation do not match.")
+        if self.database.get_user_by_username(normalized_username):
+            raise ValueError("That username already exists.")
+        try:
+            user_id = self.database.create_user(normalized_username, hash_password(password), role="USER")
+        except sqlite3.IntegrityError as error:
+            raise ValueError("That username already exists.") from error
+        self.database.log_security_event(
+            "VIEWER_CREATED",
+            user_id=user_id,
+            details=f"created_by_user={actor['user_id']}",
+        )
+        return user_id
+
+    def set_viewer_active(self, actor: Mapping[str, object], user_id: int, active: bool) -> int:
+        self.require_owner(actor)
+        viewer = self.database.get_user(user_id)
+        if not viewer or str(viewer["role"]).upper() != "USER":
+            raise ValueError("Viewer account not found.")
+        self.database.set_user_active(user_id, active)
+        revoked = 0 if active else self.database.revoke_user_sessions(user_id)
+        self.database.log_security_event(
+            "VIEWER_ENABLED" if active else "VIEWER_DISABLED",
+            user_id=user_id,
+            details=f"changed_by_user={actor['user_id']};sessions_revoked={revoked}",
+        )
+        return revoked
 
     def revoke_session(self, actor: Mapping[str, object], target_session_id: str) -> None:
         self.require_owner(actor)

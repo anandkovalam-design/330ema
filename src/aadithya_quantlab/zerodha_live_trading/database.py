@@ -163,6 +163,14 @@ class Database:
     def get_user(self, user_id: int) -> dict[str, Any] | None:
         return self.fetch_one("SELECT * FROM users WHERE id = ?", (user_id,))
 
+    def list_users(self, role: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT id,username,role,active,created_at,password_changed_at FROM users"
+        parameters: Sequence[Any] = ()
+        if role:
+            query += " WHERE role=?"
+            parameters = (role.upper(),)
+        return self.fetch_all(f"{query} ORDER BY username COLLATE NOCASE", parameters)
+
     def owner_exists(self) -> bool:
         return self.fetch_one("SELECT id FROM users WHERE role='OWNER' LIMIT 1") is not None
 
@@ -172,6 +180,18 @@ class Database:
                 "UPDATE users SET password_hash=?, password_changed_at=? WHERE id=?",
                 (password_hash, utc_now_iso(), user_id),
             )
+
+    def set_user_active(self, user_id: int, active: bool) -> None:
+        with self.transaction() as connection:
+            connection.execute("UPDATE users SET active=? WHERE id=?", (int(active), user_id))
+
+    def revoke_user_sessions(self, user_id: int) -> int:
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE sessions SET revoked=1 WHERE user_id=? AND revoked=0",
+                (user_id,),
+            )
+            return int(cursor.rowcount)
 
     def create_session(self, values: Mapping[str, Any]) -> None:
         columns = (
