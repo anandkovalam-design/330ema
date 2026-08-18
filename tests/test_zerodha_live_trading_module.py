@@ -44,6 +44,7 @@ def test_mcx_front_future_and_atm_option_are_resolved_dynamically() -> None:
         {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL26SEPFUT", "instrument_type": "FUT", "expiry": later_expiry, "instrument_token": 202},
         {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL6000CE", "instrument_type": "CE", "expiry": future_expiry, "strike": 6000, "lot_size": 100},
         {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL6100CE", "instrument_type": "CE", "expiry": future_expiry, "strike": 6100, "lot_size": 100},
+        {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL6200NEXTCE", "instrument_type": "CE", "expiry": later_expiry, "strike": 6200, "lot_size": 100},
     ]
 
     cfg = UNDERLYINGS["CRUDEOIL"]
@@ -51,6 +52,11 @@ def test_mcx_front_future_and_atm_option_are_resolved_dynamically() -> None:
     instrument = _select_option_contract(object(), cfg, "CALL", 6070.0, instrument_rows=rows)
     assert instrument == "MCX:CRUDEOIL6100CE"
     assert _contract_lot_size(instrument, rows) == 100
+    assert _front_future_row(cfg, rows, expiry_offset=1)["instrument_token"] == 202
+    next_instrument = _select_option_contract(
+        object(), cfg, "CALL", 6170.0, expiry_week_offset=1, instrument_rows=rows
+    )
+    assert next_instrument == "MCX:CRUDEOIL6200NEXTCE"
 
 
 def test_standalone_dashboard_entry_point() -> None:
@@ -133,7 +139,11 @@ def test_nifty_hard_stop_closes_paper_position_and_keeps_engine_off(monkeypatch)
             "close": [24010.0, 24020.0],
         }
     )
-    monkeypatch.setattr(app, "_fetch_spot_5m", lambda kite, cfg, instrument_rows=None: bars)
+    monkeypatch.setattr(
+        app,
+        "_fetch_spot_5m",
+        lambda kite, cfg, instrument_rows=None, expiry_offset=0: bars,
+    )
     monkeypatch.setattr(app, "_extract_ltp", lambda kite, instrument: 110.0)
     monkeypatch.setattr(app, "_complete_persistent_trade", lambda *args, **kwargs: None)
     engine = _default_state_for(UNDERLYINGS["NIFTY"])

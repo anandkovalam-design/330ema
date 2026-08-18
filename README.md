@@ -43,10 +43,11 @@ the live-order confirmation. New EMA crossover entries are accepted through
 15:00 IST (inclusive), and every remaining open trade is exited at 15:15 IST.
 
 The same EMA 3/30 workflow also supports MCX CRUDEOIL, NATURALGAS, GOLD, and
-SILVER options. Each commodity chart follows its nearest live futures contract;
-CALL/PUT entries use the nearest-expiry ATM option and the lot size reported by
-Zerodha's current instrument master. Commodity entries are accepted through
-22:30 IST and remaining positions are exited at 22:50 IST.
+SILVER options. The dashboard independently selects Current month or Next month
+for MCX; each commodity chart and its CALL/PUT ATM option use the same selected
+listed expiry. Contract lot sizes come from Zerodha's current instrument master.
+Commodity entries are accepted through 22:30 IST and remaining positions are
+exited at 22:50 IST.
 
 ## Zerodha dashboard: Docker and Azure Container Apps
 

@@ -481,7 +481,11 @@ def _row_matches_underlying(row: dict[str, Any], cfg: UnderlyingConfig) -> bool:
     return bool(suffix) and suffix[0].isdigit()
 
 
-def _front_future_row(cfg: UnderlyingConfig, instrument_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _front_future_row(
+    cfg: UnderlyingConfig,
+    instrument_rows: list[dict[str, Any]],
+    expiry_offset: int = 0,
+) -> dict[str, Any]:
     session_date = datetime.now(IST).date()
     candidates: list[tuple[date, str, dict[str, Any]]] = []
     for row in instrument_rows:
@@ -496,18 +500,25 @@ def _front_future_row(cfg: UnderlyingConfig, instrument_rows: list[dict[str, Any
         candidates.append((expiry.date(), symbol, row))
     if not candidates:
         raise ValueError(f"No live {cfg.name} MCX futures contract found.")
-    return sorted(candidates, key=lambda item: (item[0], item[1]))[0][2]
+    expiry_dates = sorted({item[0] for item in candidates})
+    selected_offset = max(int(expiry_offset), 0)
+    if selected_offset >= len(expiry_dates):
+        raise ValueError(f"No {'next-month' if selected_offset else 'current-month'} {cfg.name} MCX futures contract found.")
+    selected_expiry = expiry_dates[selected_offset]
+    selected = [item for item in candidates if item[0] == selected_expiry]
+    return sorted(selected, key=lambda item: item[1])[0][2]
 
 
 def _signal_instrument(
     cfg: UnderlyingConfig,
     instrument_rows: list[dict[str, Any]] | None = None,
+    expiry_offset: int = 0,
 ) -> tuple[int, str]:
     if cfg.signal_source == "SPOT":
         if cfg.spot_instrument_token is None:
             raise ValueError(f"No spot instrument token configured for {cfg.name}.")
         return int(cfg.spot_instrument_token), cfg.name
-    future = _front_future_row(cfg, instrument_rows or [])
+    future = _front_future_row(cfg, instrument_rows or [], expiry_offset=expiry_offset)
     return int(future["instrument_token"]), str(future["tradingsymbol"])
 
 
@@ -515,10 +526,11 @@ def _fetch_spot_5m(
     kite: KiteConnect,
     cfg: UnderlyingConfig,
     instrument_rows: list[dict[str, Any]] | None = None,
+    expiry_offset: int = 0,
 ) -> pd.DataFrame:
     now_ist = datetime.now(IST)
     start_dt = datetime.combine(now_ist.date() - timedelta(days=7), wall_time(9, 0), tzinfo=IST)
-    instrument_token, signal_symbol = _signal_instrument(cfg, instrument_rows)
+    instrument_token, signal_symbol = _signal_instrument(cfg, instrument_rows, expiry_offset=expiry_offset)
     rows = kite.historical_data(
         instrument_token,
         start_dt,
@@ -639,8 +651,15 @@ def _select_option_contract(
             post_target = [r for r in pool if r[0] >= target_expiry]
             candidates = post_target if post_target else pool
     else:
-        nearest_expiry = min(row[0] for row in pool)
-        candidates = [row for row in pool if row[0] == nearest_expiry]
+        expiry_dates = sorted({row[0] for row in pool})
+        selected_offset = max(int(expiry_week_offset), 0)
+        if selected_offset >= len(expiry_dates):
+            raise ValueError(
+                f"No {'next-month' if selected_offset else 'current-month'} eligible "
+                f"{cfg.name} {option_type} contract found."
+            )
+        selected_expiry = expiry_dates[selected_offset]
+        candidates = [row for row in pool if row[0] == selected_expiry]
     _, _, symbol, _ = sorted(candidates, key=lambda item: (item[0], item[1], item[2]))[0]
     return f"{cfg.option_exchange}:{symbol}"
 
@@ -973,7 +992,7 @@ def _run_engine_for(
 ) -> dict[str, Any]:
     now_ist = datetime.now(IST)
 
-    bars = _fetch_spot_5m(kite, cfg, instrument_rows)
+    bars = _fetch_spot_5m(kite, cfg, instrument_rows, expiry_offset=expiry_week_offset)
     if bars.empty:
         engine["entry_status"] = "No market data returned"
         return engine
@@ -1288,7 +1307,12 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
 
 
 @st.fragment(run_every=3, parallel=True)
-def _render_live_engine(trade_mode: str, real_mode_armed: bool, expiry_week_offset: int) -> None:
+def _render_live_engine(
+    trade_mode: str,
+    real_mode_armed: bool,
+    expiry_week_offset: int,
+    commodity_expiry_offset: int,
+) -> None:
     token = st.session_state.get("dashboard_session_token")
     if not _authentication().validate_session(token, touch=False):
         st.session_state.pop("dashboard_session_token", None)
@@ -1307,6 +1331,9 @@ def _render_live_engine(trade_mode: str, real_mode_armed: bool, expiry_week_offs
                 mcx_rows = _cached_exchange_instruments(kite, "MCX")
                 for name, cfg in UNDERLYINGS.items():
                     state = st.session_state.engine_state[name]
+                    contract_expiry_offset = (
+                        expiry_week_offset if cfg.expiry_weekday is not None else commodity_expiry_offset
+                    )
                     st.session_state.engine_state[name] = _run_engine_for(
                         kite=kite,
                         cfg=cfg,
@@ -1314,7 +1341,7 @@ def _render_live_engine(trade_mode: str, real_mode_armed: bool, expiry_week_offs
                         entry_start=_parse_hhmm(cfg.entry_start_ist),
                         entry_end=_parse_hhmm(cfg.entry_cutoff_ist),
                         force_exit=_parse_hhmm(cfg.mandatory_exit_ist),
-                        expiry_week_offset=expiry_week_offset,
+                        expiry_week_offset=contract_expiry_offset,
                         trade_mode=trade_mode,
                         real_mode_armed=real_mode_armed,
                         instrument_rows=mcx_rows if cfg.option_exchange == "MCX" else None,
@@ -1959,16 +1986,26 @@ def main() -> None:
             st.caption("PAPER mode: strategy runs simulation only. No broker order is placed.")
         st.success(f"Selected execution mode: {trade_mode}")
 
-        expiry_mode = st.segmented_control(
-            "Expiry selection mode",
-            options=["Current week", "Next week"],
-            default="Next week",
-            key="expiry_mode",
-        )
+        index_expiry_column, commodity_expiry_column = st.columns(2)
+        with index_expiry_column:
+            expiry_mode = st.segmented_control(
+                "NIFTY and SENSEX expiry",
+                options=["Current week", "Next week"],
+                default="Next week",
+                key="index_expiry_mode",
+            )
+        with commodity_expiry_column:
+            commodity_expiry_mode = st.segmented_control(
+                "MCX commodity expiry",
+                options=["Current month", "Next month"],
+                default="Current month",
+                key="commodity_expiry_mode",
+            )
         expiry_week_offset = 1 if expiry_mode == "Next week" else 0
-        st.success(f"Selected expiry: {expiry_mode}")
+        commodity_expiry_offset = 1 if commodity_expiry_mode == "Next month" else 0
+        st.success(f"Selected expiry: indices {expiry_mode}; commodities {commodity_expiry_mode}")
         st.caption(
-            f"Index option filter: {expiry_mode}. MCX uses the nearest live futures chart and nearest option expiry."
+            f"Index option filter: {expiry_mode}. MCX futures chart and ATM option: {commodity_expiry_mode}."
         )
 
         st.markdown("**Position sizing and daily limits**")
@@ -2088,7 +2125,12 @@ def main() -> None:
             for state in st.session_state.engine_state.values()
         )
     )
-    _render_live_engine(str(trade_mode), effective_real_mode_armed, expiry_week_offset)
+    _render_live_engine(
+        str(trade_mode),
+        effective_real_mode_armed,
+        expiry_week_offset,
+        commodity_expiry_offset,
+    )
 
 
 if __name__ == "__main__":
