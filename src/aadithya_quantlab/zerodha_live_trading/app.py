@@ -284,27 +284,27 @@ def _save_risk_settings(engine_state: dict[str, dict[str, Any]]) -> None:
     RISK_SETTINGS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _migrate_scaled_metal_point_values(engine_state: dict[str, dict[str, Any]]) -> bool:
-    """Upgrade untouched legacy GOLD/SILVER point settings to NIFTY-scaled values."""
-    legacy_points = {
-        "sl_points": 20.0,
-        "trail_trigger_points": 15.0,
-        "trail_step_points": 5.0,
-    }
-    migrated = False
+def _sync_scaled_metal_risk_settings(engine_state: dict[str, dict[str, Any]]) -> bool:
+    """Keep GOLD at 6x and SILVER at 10x NIFTY point settings."""
+    nifty = engine_state.get("NIFTY")
+    if not isinstance(nifty, dict):
+        return False
+    point_keys = ("sl_points", "trail_trigger_points", "trail_step_points")
+    percentage_keys = ("sl_to_cost_profit_pct", "trail_after_profit_pct", "mfe_giveback_pct")
+    changed = False
     for name in ("GOLD", "SILVER"):
         state = engine_state.get(name)
         if not isinstance(state, dict):
             continue
-        if not all(
-            abs(_to_float(state.get(key), legacy) - legacy) < 1e-9
-            for key, legacy in legacy_points.items()
-        ):
-            continue
         multiplier = UNDERLYINGS[name].risk_point_multiplier
-        state.update({key: value * multiplier for key, value in legacy_points.items()})
-        migrated = True
-    return migrated
+        expected = {
+            **{key: _to_float(nifty.get(key), 0.0) * multiplier for key in point_keys},
+            **{key: _to_float(nifty.get(key), 0.0) for key in percentage_keys},
+        }
+        if any(abs(_to_float(state.get(key), value) - value) >= 1e-9 for key, value in expected.items()):
+            state.update(expected)
+            changed = True
+    return changed
 
 
 def _save_connection_for_today(api_key: str, access_token: str) -> None:
@@ -1426,14 +1426,14 @@ def _init_session_state() -> None:
         st.session_state.engine_state, recovery_metadata = _restore_persistent_engine_state()
         for name, settings in _load_risk_settings().items():
             st.session_state.engine_state[name].update(settings)
-        if _migrate_scaled_metal_point_values(st.session_state.engine_state):
-            _save_risk_settings(st.session_state.engine_state)
         st.session_state.recovery_metadata = recovery_metadata
     else:
         for name, cfg in UNDERLYINGS.items():
             state = st.session_state.engine_state.setdefault(name, {})
             for key, value in _default_state_for(cfg).items():
                 state.setdefault(key, value)
+    if _sync_scaled_metal_risk_settings(st.session_state.engine_state):
+        _save_risk_settings(st.session_state.engine_state)
     for name in UNDERLYINGS:
         toggle_key = f"{name.lower()}_turn_off"
         if toggle_key not in st.session_state:
@@ -2094,35 +2094,51 @@ def main() -> None:
         with st.expander("Trailing stop settings", expanded=True):
             for name in UNDERLYINGS:
                 state = st.session_state.engine_state[name]
+                linked_to_nifty = name in ("GOLD", "SILVER")
                 with st.form(f"{name.lower()}_risk_settings"):
                     st.markdown(f"**{name} risk and trailing values**")
+                    if linked_to_nifty:
+                        multiplier = UNDERLYINGS[name].risk_point_multiplier
+                        st.caption(
+                            f"Linked to NIFTY: point values are {multiplier:g}x; percentages match NIFTY."
+                        )
                     t1, t2, t3 = st.columns(3)
                     sl_points = t1.number_input(
                         f"{name} fixed SL points", min_value=1.0,
                         value=_to_float(state.get("sl_points"), UNDERLYINGS[name].default_sl_points), step=1.0,
+                        disabled=linked_to_nifty,
                     )
                     sl_to_cost_pct = t2.number_input(
                         f"{name} SL to cost %", min_value=1.0, max_value=200.0,
                         value=_to_float(state.get("sl_to_cost_profit_pct"), 0.30) * 100.0, step=1.0,
+                        disabled=linked_to_nifty,
                     )
                     trail_after_pct = t3.number_input(
                         f"{name} trail starts %", min_value=1.0, max_value=300.0,
                         value=_to_float(state.get("trail_after_profit_pct"), 0.50) * 100.0, step=1.0,
+                        disabled=linked_to_nifty,
                     )
                     t4, t5, t6 = st.columns(3)
                     giveback_pct = t4.number_input(
                         f"{name} giveback %", min_value=0.0, max_value=100.0,
                         value=_to_float(state.get("mfe_giveback_pct"), 0.275) * 100.0, step=0.5,
+                        disabled=linked_to_nifty,
                     )
                     trigger_points = t5.number_input(
                         f"{name} trigger points", min_value=1.0,
                         value=_to_float(state.get("trail_trigger_points"), 15.0), step=1.0,
+                        disabled=linked_to_nifty,
                     )
                     step_points = t6.number_input(
                         f"{name} SL step points", min_value=0.0,
                         value=_to_float(state.get("trail_step_points"), 5.0), step=1.0,
+                        disabled=linked_to_nifty,
                     )
-                    submitted = st.form_submit_button(f"Save {name} settings", width="stretch")
+                    submitted = st.form_submit_button(
+                        f"{name} follows NIFTY" if linked_to_nifty else f"Save {name} settings",
+                        width="stretch",
+                        disabled=linked_to_nifty,
+                    )
 
                 if submitted:
                     state.update(
@@ -2135,6 +2151,8 @@ def main() -> None:
                             "trail_step_points": float(step_points),
                         }
                     )
+                    if name == "NIFTY":
+                        _sync_scaled_metal_risk_settings(st.session_state.engine_state)
                     _save_risk_settings(st.session_state.engine_state)
                     st.session_state.risk_settings_saved_at[name] = datetime.now(IST).strftime("%H:%M:%S")
 

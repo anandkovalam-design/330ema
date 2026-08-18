@@ -49,9 +49,9 @@ listed expiry. Contract lot sizes come from Zerodha's current instrument master.
 Commodity entries are accepted through 22:30 IST and remaining positions are
 exited at 22:50 IST.
 
-GOLD uses six times NIFTY's point-based risk defaults, while SILVER uses ten
-times NIFTY's point-based defaults. Percentage-based trailing settings remain
-the same as NIFTY.
+GOLD continuously uses six times NIFTY's point-based risk settings, while
+SILVER uses ten times NIFTY's point-based settings. Their percentage-based
+trailing settings match NIFTY and update whenever NIFTY settings are saved.
 
 ## Zerodha dashboard: Docker and Azure Container Apps
 
