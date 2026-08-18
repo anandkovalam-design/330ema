@@ -1073,6 +1073,20 @@ def _apply_pending_hard_stops(engine_state: dict[str, dict[str, Any]]) -> set[st
     return pending
 
 
+def _request_hard_stop_from_controls(name: str) -> None:
+    engine_state = st.session_state["engine_state"]
+    state = engine_state[name]
+    state["enabled"] = False
+    state["hard_stop_requested"] = True
+    st.session_state[f"{name.lower()}_turn_off"] = True
+    request_hard_stop(
+        HARD_STOP_COMMAND_PATH,
+        underlying=name,
+        requested_at=datetime.now(IST),
+    )
+    _persist_engine_state(engine_state)
+
+
 def _has_unverified_broker_activity(state: dict[str, Any]) -> bool:
     open_trade = state.get("open_trade")
     if isinstance(open_trade, dict) and str(open_trade.get("trade_mode", "PAPER")).upper() == "REAL":
@@ -2618,17 +2632,14 @@ def main() -> None:
                             disabled=bool(state.get("reconciliation_required")),
                         )
                         state["enabled"] = not turned_off and not bool(state.get("reconciliation_required"))
-                        if st.button(f"Hard stop {name}", key=f"hard_stop_{name}", type="primary", width="stretch"):
-                            state["enabled"] = False
-                            state["hard_stop_requested"] = True
-                            st.session_state[toggle_key] = True
-                            request_hard_stop(
-                                HARD_STOP_COMMAND_PATH,
-                                underlying=name,
-                                requested_at=datetime.now(IST),
-                            )
-                            _persist_engine_state(st.session_state.engine_state)
-                            st.rerun()
+                        st.button(
+                            f"Hard stop {name}",
+                            key=f"hard_stop_{name}",
+                            type="primary",
+                            width="stretch",
+                            on_click=_request_hard_stop_from_controls,
+                            args=(name,),
+                        )
                         status = "RUNNING" if state["enabled"] else "OFF"
                         cfg = UNDERLYINGS[name]
                         st.caption(

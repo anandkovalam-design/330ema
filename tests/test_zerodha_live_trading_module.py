@@ -1,5 +1,6 @@
 import pandas as pd
 from datetime import datetime, time as wall_time, timedelta
+from types import SimpleNamespace
 
 from aadithya_quantlab.zerodha_live_trading import main
 from aadithya_quantlab.zerodha_live_trading import app
@@ -34,6 +35,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _trade_pnl_quantity,
     MCX_CONTRACT_SPECS,
     _run_parallel_index_engines,
+    _request_hard_stop_from_controls,
     _reset_durable_paper_trade_state,
     _sync_scaled_metal_risk_settings,
     _run_engine_for,
@@ -717,6 +719,28 @@ def test_hard_stop_request_crosses_streamlit_sessions(tmp_path, monkeypatch) -> 
     assert live_session_state["SILVER"]["hard_stop_requested"] is True
     acknowledge_hard_stop_requests(command_path, {"SILVER"})
     assert load_hard_stop_requests(command_path) == {}
+
+
+def test_hard_stop_control_callback_updates_toggle_before_widget_render(monkeypatch) -> None:
+    engine_state = {"SILVER": _default_state_for(UNDERLYINGS["SILVER"])}
+    session_state = {"engine_state": engine_state, "silver_turn_off": False}
+    requested: list[str] = []
+    persisted: list[dict[str, dict]] = []
+    monkeypatch.setattr(app, "st", SimpleNamespace(session_state=session_state))
+    monkeypatch.setattr(
+        app,
+        "request_hard_stop",
+        lambda path, *, underlying, requested_at: requested.append(underlying),
+    )
+    monkeypatch.setattr(app, "_persist_engine_state", lambda state: persisted.append(state))
+
+    _request_hard_stop_from_controls("SILVER")
+
+    assert session_state["silver_turn_off"] is True
+    assert engine_state["SILVER"]["enabled"] is False
+    assert engine_state["SILVER"]["hard_stop_requested"] is True
+    assert requested == ["SILVER"]
+    assert persisted == [engine_state]
 
 
 def test_credentials_round_trip_through_keyring(monkeypatch) -> None:
