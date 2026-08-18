@@ -18,6 +18,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _default_state_for,
     _entries_blocked_for_expiry_day,
     _front_future_row,
+    _format_ist_timestamp,
     _has_opposite_heikin_ashi_candle,
     _latest_confirmed_heikin_ashi_signal,
     _contract_lot_size,
@@ -35,6 +36,13 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _update_trailing_stop,
     UNDERLYINGS,
 )
+
+
+def test_dashboard_timestamp_formatter_converts_all_values_to_ist() -> None:
+    assert _format_ist_timestamp("2026-08-18T12:30:00+00:00") == "18 Aug 2026, 06:00:00 PM IST"
+    assert _format_ist_timestamp("2026-08-18T18:00:00+05:30") == "18 Aug 2026, 06:00:00 PM IST"
+    assert _format_ist_timestamp("2026-08-18T18:00:00") == "18 Aug 2026, 06:00:00 PM IST"
+    assert _format_ist_timestamp(None) == "—"
 
 
 def test_live_trading_schedule_runs_entries_to_1500_and_exits_at_1515() -> None:

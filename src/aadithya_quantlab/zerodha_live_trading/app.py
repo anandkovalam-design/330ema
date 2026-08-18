@@ -1395,7 +1395,10 @@ def _run_engine_for(
         engine["entry_status"] = "Current-week entries blocked on expiry weekday; select Next week to trade"
         return engine
     if now_ist.time() < entry_start or now_ist.time() > entry_end:
-        engine["entry_status"] = f"Outside entry window {entry_start.strftime('%H:%M')}-{entry_end.strftime('%H:%M')}"
+        engine["entry_status"] = (
+            f"Outside entry window {entry_start.strftime('%H:%M')}-"
+            f"{entry_end.strftime('%H:%M')} IST"
+        )
         return engine
     strategy_mode = str(engine.get("strategy_mode", STRATEGY_EMA))
     use_heikin_ashi = cfg.name in INDEX_NAMES and strategy_mode == STRATEGY_HEIKIN_ASHI
@@ -1688,18 +1691,23 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
 
             ha_events = engine.get("ha_events", [])
             if isinstance(ha_events, list) and ha_events:
-                st.caption("Recent Heikin-Ashi events")
+                st.caption("Recent Heikin-Ashi events (IST)")
                 st.code("\n".join(ha_events[-8:]))
 
         events: list[str] = engine.get("events", [])
         if events:
-            st.caption("Recent events")
+            st.caption("Recent events (IST)")
             st.code("\n".join(events[-8:]))
 
         order_logs = engine.get("order_logs", [])
         if isinstance(order_logs, list) and order_logs:
-            st.caption("Order execution logs")
-            st.dataframe(pd.DataFrame(order_logs[-8:]), width="stretch", height=220)
+            st.caption("Order execution logs (IST)")
+            st.dataframe(
+                pd.DataFrame(order_logs[-8:]),
+                width="stretch",
+                height=220,
+                column_config={"time": st.column_config.TextColumn("Time (IST)")},
+            )
 
     with right:
         bars = engine.get("latest_bars")
@@ -1960,6 +1968,24 @@ def _format_inr(value: object) -> str:
     return f"₹{_to_float(value):,.2f}"
 
 
+def _format_ist_timestamp(value: object) -> str:
+    """Format stored timestamps consistently for dashboard display in IST."""
+
+    if value is None or str(value).strip() == "":
+        return "—"
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return "—"
+    if pd.isna(timestamp):
+        return "—"
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize(IST)
+    else:
+        timestamp = timestamp.tz_convert(IST)
+    return timestamp.strftime("%d %b %Y, %I:%M:%S %p IST")
+
+
 def _render_positions_page() -> None:
     st.markdown("## :material/account_balance_wallet: Positions")
     for name in UNDERLYINGS:
@@ -1976,7 +2002,10 @@ def _render_positions_page() -> None:
                 st.metric("Entry", _format_inr(open_trade.get("entry_option")), border=True)
                 st.metric("LTP", _format_inr(open_trade.get("ltp")), border=True)
                 st.metric("Unrealized P&L", _format_inr(open_trade.get("unrealized")), border=True)
-            st.caption(f"Mode: {open_trade.get('trade_mode', 'PAPER')} · Entry: {open_trade.get('entry_time', '')}")
+            st.caption(
+                f"Mode: {open_trade.get('trade_mode', 'PAPER')} · "
+                f"Entry: {_format_ist_timestamp(open_trade.get('entry_time'))}"
+            )
 
 
 def _safe_trade_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -1986,14 +2015,18 @@ def _safe_trade_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
     ]
     if not rows:
         return pd.DataFrame(columns=columns)
-    return pd.DataFrame(rows)[columns]
+    frame = pd.DataFrame(rows)[columns]
+    for column in ("entry_time", "exit_time"):
+        frame[column] = frame[column].map(_format_ist_timestamp)
+    return frame
 
 
 def _render_trade_history_page() -> None:
     st.markdown("## :material/history: Trade history")
     left, middle, right = st.columns(3)
-    start = left.date_input("From", value=date.today().replace(day=1), key="history_start")
-    end = middle.date_input("To", value=date.today(), key="history_end")
+    today_ist = datetime.now(IST).date()
+    start = left.date_input("From", value=today_ist.replace(day=1), key="history_start")
+    end = middle.date_input("To", value=today_ist, key="history_end")
     mode = right.segmented_control("Mode", ["All", "PAPER", "REAL"], default="All", key="history_mode")
     underlying = st.segmented_control(
         "Underlying", ["All", *UNDERLYINGS.keys()], default="All", key="history_underlying"
@@ -2006,6 +2039,8 @@ def _render_trade_history_page() -> None:
         frame,
         hide_index=True,
         column_config={
+            "entry_time": st.column_config.TextColumn("Entry time (IST)"),
+            "exit_time": st.column_config.TextColumn("Exit time (IST)"),
             "entry_price": st.column_config.NumberColumn("Entry price", format="₹%.2f"),
             "exit_price": st.column_config.NumberColumn("Exit price", format="₹%.2f"),
             "realized_pnl": st.column_config.NumberColumn("Realized P&L", format="₹%.2f"),
@@ -2023,7 +2058,7 @@ def _load_thresholds() -> PnlThresholds:
 
 def _render_pnl_calendar_page() -> None:
     st.markdown("## :material/calendar_month: P&L calendar")
-    today = date.today()
+    today = datetime.now(IST).date()
     c1, c2, c3, c4 = st.columns(4)
     month = c1.selectbox("Month", list(range(1, 13)), index=today.month - 1, format_func=lambda value: calendar.month_name[value])
     year = int(c2.number_input("Year", min_value=2020, max_value=2100, value=today.year, step=1))
@@ -2065,7 +2100,13 @@ def _render_pnl_calendar_page() -> None:
         st.metric("Win rate", f"{(wins / count * 100.0) if count else 0.0:.1f}%", border=True)
     st.dataframe(
         _safe_trade_frame(selected_rows), hide_index=True,
-        column_config={"entry_price": st.column_config.NumberColumn(format="₹%.2f"), "exit_price": st.column_config.NumberColumn(format="₹%.2f"), "realized_pnl": st.column_config.NumberColumn(format="₹%.2f")},
+        column_config={
+            "entry_time": st.column_config.TextColumn("Entry time (IST)"),
+            "exit_time": st.column_config.TextColumn("Exit time (IST)"),
+            "entry_price": st.column_config.NumberColumn(format="₹%.2f"),
+            "exit_price": st.column_config.NumberColumn(format="₹%.2f"),
+            "realized_pnl": st.column_config.NumberColumn(format="₹%.2f"),
+        },
     )
 
 
@@ -2102,7 +2143,7 @@ def _render_security_page(session: dict[str, object]) -> None:
         active = bool(viewer["active"])
         with st.container(border=True):
             st.markdown(f"**{viewer['username']}** · {'Active' if active else 'Disabled'}")
-            st.caption(f"Created: {viewer['created_at']}")
+            st.caption(f"Created: {_format_ist_timestamp(viewer['created_at'])}")
             action = "Disable access" if active else "Enable access"
             if st.button(
                 action,
@@ -2120,7 +2161,8 @@ def _render_security_page(session: dict[str, object]) -> None:
         with st.container(border=True):
             st.markdown(f"**{item['username']}** {'· Current session' if is_current else ''}")
             st.write(
-                f"Login: {item['created_at']} · Last activity: {item['last_activity']} · "
+                f"Login: {_format_ist_timestamp(item['created_at'])} · "
+                f"Last activity: {_format_ist_timestamp(item['last_activity'])} · "
                 f"Approx. location: {item.get('city') or 'Unavailable'}, {item.get('region') or 'Unavailable'}, {item.get('country') or 'Unavailable'}"
             )
             st.caption(
@@ -2134,7 +2176,14 @@ def _render_security_page(session: dict[str, object]) -> None:
         count = _authentication().revoke_all_other_sessions(session)
         st.success(f"Terminated {count} other session(s).")
     st.subheader("Security audit log")
-    st.dataframe(pd.DataFrame(_database().security_events()), hide_index=True)
+    security_frame = pd.DataFrame(_database().security_events())
+    if "timestamp" in security_frame.columns:
+        security_frame["timestamp"] = security_frame["timestamp"].map(_format_ist_timestamp)
+    st.dataframe(
+        security_frame,
+        hide_index=True,
+        column_config={"timestamp": st.column_config.TextColumn("Time (IST)")},
+    )
 
 
 def _navigation_pages_for_role(role: str) -> list[str]:
@@ -2385,7 +2434,7 @@ def main() -> None:
                 "Recovered broker activity is unverified. Trade logic is OFF until a manual broker reconciliation matches."
             )
         elif recovery_saved_at:
-            st.caption(f"Durable state restored from {recovery_saved_at}.")
+            st.caption(f"Durable state restored from {_format_ist_timestamp(recovery_saved_at)}.")
 
         if st.button(
             "Reconcile recovered state with Zerodha",
