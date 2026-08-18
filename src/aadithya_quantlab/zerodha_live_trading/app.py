@@ -803,6 +803,18 @@ def _contract_lot_size(instrument: str, instrument_rows: list[dict[str, Any]]) -
     raise ValueError(f"No valid lot size found for {instrument}.")
 
 
+def _mcx_order_quantity(
+    instrument: str,
+    instrument_rows: list[dict[str, Any]],
+    requested_lots: int,
+) -> tuple[int, int, int]:
+    """Return (lots, Zerodha lot_size, broker order quantity) for an MCX contract."""
+
+    lots = max(1, int(requested_lots))
+    broker_lot_size = _contract_lot_size(instrument, instrument_rows)
+    return lots, broker_lot_size, lots * broker_lot_size
+
+
 def _extract_ltp(kite: KiteConnect, instrument: str) -> float:
     payload = kite.ltp(instrument)
     info = payload.get(instrument)
@@ -1418,15 +1430,20 @@ def _run_engine_for(
         else _to_float(engine.get("sl_points"), cfg.default_sl_points)
     )
     stop_price = max(entry_option - sl_points, 0.05)
+    selected_lots = max(1, int(engine.get("lots", cfg.default_lots)))
     if cfg.signal_source == "FRONT_FUTURE":
         if not instrument_rows:
             raise ValueError(f"MCX instrument master is unavailable for {cfg.name}.")
-        lot_size = _contract_lot_size(instrument, instrument_rows)
-        qty = lot_size * max(1, int(engine.get("lots", cfg.default_lots)))
+        selected_lots, lot_size, qty = _mcx_order_quantity(
+            instrument,
+            instrument_rows,
+            selected_lots,
+        )
         engine["quantity"] = qty
         engine["lot_size"] = lot_size
     else:
         qty = int(engine.get("quantity", cfg.default_qty))
+        lot_size = LOT_SIZES.get(cfg.name, max(1, qty // selected_lots))
 
     entry_order_id = "PAPER"
     if trade_mode == "REAL":
@@ -1471,6 +1488,8 @@ def _run_engine_for(
         "entry_spot": spot_price,
         "entry_option": entry_option,
         "quantity": qty,
+        "lots": selected_lots,
+        "exchange_lot_size": lot_size,
         "stop_price": stop_price,
         "max_ltp": entry_option,
         "trailing_active": False,
@@ -1596,6 +1615,21 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
             st.write(f"Entry: {_to_float(open_trade.get('entry_option')):.2f}")
             st.write(f"Entry order id: {open_trade.get('entry_order_id','')}")
             st.write(f"Mode: {open_trade.get('trade_mode','PAPER')}")
+            trade_quantity = int(open_trade.get("quantity", 0))
+            if cfg.option_exchange == "MCX":
+                broker_lot_size = int(
+                    open_trade.get("exchange_lot_size", engine.get("lot_size", 1))
+                )
+                inferred_lots = max(1, trade_quantity // max(1, broker_lot_size))
+                trade_lots = int(open_trade.get("lots", inferred_lots))
+                st.write(f"MCX lots: {trade_lots}")
+                st.write(f"Broker order quantity: {trade_quantity}")
+                st.caption(
+                    f"Zerodha instrument-master lot_size: {broker_lot_size}. "
+                    "A broker quantity of 1 is one MCX contract lot, not one gram/kg/barrel."
+                )
+            else:
+                st.write(f"Quantity: {trade_quantity}")
             st.write(f"LTP: {_to_float(open_trade.get('ltp')):.2f}")
             st.write(f"uPnL: {_to_float(open_trade.get('unrealized')):.2f}")
             stop = _to_float(open_trade.get("stop_price"))
@@ -2434,11 +2468,17 @@ def main() -> None:
                     state["lots"] = lots
                     if name in LOT_SIZES:
                         state["quantity"] = lots * LOT_SIZES[name]
-                        st.caption(f"Quantity: {state['quantity']}")
+                        st.caption(f"Lots: {lots} · broker order quantity: {state['quantity']}")
                     elif state.get("lot_size"):
-                        st.caption(f"Current quantity: {lots * int(state['lot_size'])}")
+                        broker_lot_size = int(state["lot_size"])
+                        st.caption(
+                            f"MCX lots: {lots} · broker order quantity: {lots * broker_lot_size} · "
+                            f"Zerodha lot_size: {broker_lot_size}"
+                        )
                     else:
-                        st.caption("Quantity resolves from the selected MCX contract lot size.")
+                        st.caption(
+                            "Broker order quantity resolves from the selected MCX option's live Zerodha lot_size."
+                        )
                     max_trades = st.number_input(
                         f"{name} max trades", min_value=1,
                         value=int(state.get("max_trades", 3)), step=1,

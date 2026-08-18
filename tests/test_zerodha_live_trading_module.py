@@ -23,6 +23,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _contract_lot_size,
     _load_login_credentials,
     _load_risk_settings,
+    _mcx_order_quantity,
     _run_parallel_index_engines,
     _sync_scaled_metal_risk_settings,
     _run_engine_for,
@@ -108,6 +109,37 @@ def test_mcx_front_future_and_atm_option_are_resolved_dynamically() -> None:
         object(), cfg, "CALL", 6170.0, expiry_week_offset=1, instrument_rows=rows
     )
     assert next_instrument == "MCX:CRUDEOIL6200NEXTCE"
+
+
+def test_all_mcx_commodities_treat_live_lot_size_one_as_one_contract_lot() -> None:
+    rows = [
+        {
+            "name": name,
+            "tradingsymbol": f"{name}TESTCE",
+            "instrument_type": "CE",
+            "lot_size": 1,
+        }
+        for name in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER")
+    ]
+
+    for name in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"):
+        lots, broker_lot_size, order_quantity = _mcx_order_quantity(
+            f"MCX:{name}TESTCE",
+            rows,
+            requested_lots=1,
+        )
+        assert lots == 1
+        assert broker_lot_size == 1
+        assert order_quantity == 1
+
+        lots, broker_lot_size, order_quantity = _mcx_order_quantity(
+            f"MCX:{name}TESTCE",
+            rows,
+            requested_lots=3,
+        )
+        assert lots == 3
+        assert broker_lot_size == 1
+        assert order_quantity == 3
 
 
 def test_standalone_dashboard_entry_point() -> None:
