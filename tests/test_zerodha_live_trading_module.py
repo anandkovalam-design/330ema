@@ -33,6 +33,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _select_option_contract,
     _save_login_credentials,
     _save_risk_settings,
+    _safe_trade_frame,
     _update_trailing_stop,
     UNDERLYINGS,
 )
@@ -43,6 +44,30 @@ def test_dashboard_timestamp_formatter_converts_all_values_to_ist() -> None:
     assert _format_ist_timestamp("2026-08-18T18:00:00+05:30") == "18 Aug 2026, 06:00:00 PM IST"
     assert _format_ist_timestamp("2026-08-18T18:00:00") == "18 Aug 2026, 06:00:00 PM IST"
     assert _format_ist_timestamp(None) == "—"
+
+
+def test_trade_history_displays_human_readable_strategy() -> None:
+    frame = _safe_trade_frame(
+        [
+            {
+                "trade_date": "2026-08-18",
+                "mode": "PAPER",
+                "strategy": STRATEGY_HEIKIN_ASHI,
+                "underlying": "NIFTY",
+                "option_symbol": "NFO:NIFTYTESTCE",
+                "side": "CALL",
+                "quantity": 65,
+                "entry_time": "2026-08-18T10:00:00+05:30",
+                "exit_time": None,
+                "entry_price": 100.0,
+                "exit_price": None,
+                "realized_pnl": None,
+                "exit_reason": None,
+            }
+        ]
+    )
+
+    assert frame.loc[0, "strategy"] == "Heikin-Ashi reversal"
 
 
 def test_live_trading_schedule_runs_entries_to_1500_and_exits_at_1515() -> None:

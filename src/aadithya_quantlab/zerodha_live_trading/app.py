@@ -1093,10 +1093,11 @@ def _persist_open_trade(cfg: UnderlyingConfig, open_trade: dict[str, Any]) -> No
     entry_time = str(open_trade["entry_time"])
     entry_order_id = str(open_trade.get("entry_order_id", ""))
     mode = str(open_trade.get("trade_mode", "PAPER")).upper()
+    strategy = str(open_trade.get("strategy_mode") or STRATEGY_EMA)
     trade_key = (
         f"REAL:{entry_order_id}"
         if mode == "REAL" and entry_order_id
-        else f"PAPER:{cfg.name}:{open_trade['instrument']}:{entry_time}"
+        else f"PAPER:{strategy}:{cfg.name}:{open_trade['instrument']}:{entry_time}"
     )
     trade_id = _database().upsert_open_trade(
         {
@@ -1110,6 +1111,7 @@ def _persist_open_trade(cfg: UnderlyingConfig, open_trade: dict[str, Any]) -> No
             "entry_time": entry_time,
             "entry_price": _to_float(open_trade["entry_option"]),
             "entry_order_id": entry_order_id or None,
+            "strategy": strategy,
         }
     )
     open_trade["persistent_trade_id"] = trade_id
@@ -1138,6 +1140,7 @@ def _complete_persistent_trade(
         realized_pnl=realized_pnl,
         exit_order_id=str(open_trade.get("exit_order_id") or "") or None,
         exit_reason=exit_reason,
+        strategy=str(open_trade.get("strategy_mode") or STRATEGY_EMA),
     )
 
 
@@ -1766,7 +1769,7 @@ def _render_live_engine(
         st.session_state.pop("dashboard_session_token", None)
         st.rerun(scope="app")
     with st.container(border=True):
-        st.subheader(":material/monitoring: 3) Live market and trade engine")
+        st.subheader(":material/monitoring: Live market and trade engine")
         st.caption(
             f"Entry window: {ENTRY_START_IST}-{ENTRY_CUTOFF_IST} IST (15:00 inclusive) · "
             f"mandatory exit: {MANDATORY_EXIT_IST} IST. MCX entries: 09:00-22:30 IST · mandatory exit: 22:50 IST."
@@ -2010,12 +2013,23 @@ def _render_positions_page() -> None:
 
 def _safe_trade_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
     columns = [
-        "trade_date", "mode", "underlying", "option_symbol", "side", "quantity",
+        "trade_date", "mode", "strategy", "underlying", "option_symbol", "side", "quantity",
         "entry_time", "exit_time", "entry_price", "exit_price", "realized_pnl", "exit_reason",
     ]
     if not rows:
         return pd.DataFrame(columns=columns)
-    frame = pd.DataFrame(rows)[columns]
+    frame = pd.DataFrame(rows)
+    if "strategy" not in frame.columns:
+        frame["strategy"] = STRATEGY_EMA
+    strategy_labels = {
+        STRATEGY_EMA: "EMA 3/30",
+        STRATEGY_HEIKIN_ASHI: "Heikin-Ashi reversal",
+        "LEGACY_UNKNOWN": "Legacy trade (strategy not recorded)",
+    }
+    frame["strategy"] = frame["strategy"].fillna(STRATEGY_EMA).map(
+        lambda value: strategy_labels.get(str(value), str(value))
+    )
+    frame = frame[columns]
     for column in ("entry_time", "exit_time"):
         frame[column] = frame[column].map(_format_ist_timestamp)
     return frame
@@ -2039,6 +2053,7 @@ def _render_trade_history_page() -> None:
         frame,
         hide_index=True,
         column_config={
+            "strategy": st.column_config.TextColumn("Strategy", pinned=True),
             "entry_time": st.column_config.TextColumn("Entry time (IST)"),
             "exit_time": st.column_config.TextColumn("Exit time (IST)"),
             "entry_price": st.column_config.NumberColumn("Entry price", format="₹%.2f"),
@@ -2056,16 +2071,26 @@ def _load_thresholds() -> PnlThresholds:
     )
 
 
-def _render_pnl_calendar_page() -> None:
-    st.markdown("## :material/calendar_month: P&L calendar")
+def _render_pnl_calendar_page(asset_class: str) -> None:
+    is_index = asset_class.upper() == "INDEX"
+    asset_names = INDEX_NAMES if is_index else COMMODITY_NAMES
+    page_label = "Index" if is_index else "Commodity"
+    st.markdown(f"## :material/calendar_month: {page_label} P&L")
     today = datetime.now(IST).date()
     c1, c2, c3, c4 = st.columns(4)
     month = c1.selectbox("Month", list(range(1, 13)), index=today.month - 1, format_func=lambda value: calendar.month_name[value])
     year = int(c2.number_input("Year", min_value=2020, max_value=2100, value=today.year, step=1))
-    mode = c3.segmented_control("Mode", ["All", "PAPER", "REAL"], default="All", key="calendar_mode")
-    underlying = c4.selectbox("Underlying", ["All", *UNDERLYINGS.keys()], key="calendar_underlying")
+    mode = c3.segmented_control(
+        "Mode", ["All", "PAPER", "REAL"], default="All", key=f"calendar_mode_{asset_class.lower()}"
+    )
+    underlying = c4.selectbox(
+        "Underlying",
+        [f"All {page_label.lower()}", *asset_names],
+        key=f"calendar_underlying_{asset_class.lower()}",
+    )
+    query_underlying = asset_class.upper() if str(underlying).startswith("All ") else str(underlying)
     start, end = month_bounds(year, int(month))
-    rows = _database().daily_pnl(start.isoformat(), end.isoformat(), str(mode), str(underlying))
+    rows = _database().daily_pnl(start.isoformat(), end.isoformat(), str(mode), query_underlying)
     thresholds = _load_thresholds()
     summary = monthly_summary(rows, year, int(month))
 
@@ -2084,16 +2109,21 @@ def _render_pnl_calendar_page() -> None:
         st.metric("Winning / losing", f"{summary['winning_trades']} / {summary['losing_trades']}", border=True)
 
     st.html(calendar_html(year, int(month), rows, thresholds))
-    selected = st.date_input("Select a date for trade details", value=start, min_value=start, max_value=end)
-    selected_rows = _database().list_trades(
-        start_date=selected.isoformat(), end_date=selected.isoformat(), mode=str(mode), underlying=str(underlying)
+    selected = st.date_input(
+        "Select a date for trade details", value=start, min_value=start, max_value=end,
+        key=f"calendar_selected_date_{asset_class.lower()}",
     )
+    selected_rows = _database().list_trades(
+        start_date=selected.isoformat(), end_date=selected.isoformat(), mode=str(mode),
+        underlying="ALL" if str(underlying).startswith("All ") else str(underlying),
+    )
+    selected_rows = [row for row in selected_rows if str(row.get("underlying")) in asset_names]
     selected_daily = next((row for row in rows if row["trade_date"] == selected.isoformat()), {})
     count = int(selected_daily.get("trade_count", 0))
     wins = int(selected_daily.get("winning_trades", 0))
     with st.container(horizontal=True):
         st.metric("Total P&L", _format_inr(selected_daily.get("total_pnl")), border=True)
-        for name in UNDERLYINGS:
+        for name in asset_names:
             st.metric(f"{name} P&L", _format_inr(selected_daily.get(f"{name.lower()}_pnl")), border=True)
         st.metric("Trades", count, border=True)
         st.metric("Wins / losses", f"{wins} / {int(selected_daily.get('losing_trades', 0))}", border=True)
@@ -2101,6 +2131,7 @@ def _render_pnl_calendar_page() -> None:
     st.dataframe(
         _safe_trade_frame(selected_rows), hide_index=True,
         column_config={
+            "strategy": st.column_config.TextColumn("Strategy", pinned=True),
             "entry_time": st.column_config.TextColumn("Entry time (IST)"),
             "exit_time": st.column_config.TextColumn("Exit time (IST)"),
             "entry_price": st.column_config.NumberColumn(format="₹%.2f"),
@@ -2187,9 +2218,9 @@ def _render_security_page(session: dict[str, object]) -> None:
 
 
 def _navigation_pages_for_role(role: str) -> list[str]:
-    monitoring_pages = ["Positions", "Trade history", "P&L calendar"]
+    monitoring_pages = ["Positions", "Trade history", "Index P&L", "Commodity P&L"]
     if role.upper() == "OWNER":
-        return ["Dashboard / Live trading", *monitoring_pages, "Security", "Settings"]
+        return ["Live dashboard", "Trade controls", *monitoring_pages, "Security", "Settings"]
     return monitoring_pages
 
 
@@ -2244,8 +2275,11 @@ def main() -> None:
     if selected_page == "Trade history":
         _render_trade_history_page()
         return
-    if selected_page == "P&L calendar":
-        _render_pnl_calendar_page()
+    if selected_page == "Index P&L":
+        _render_pnl_calendar_page("INDEX")
+        return
+    if selected_page == "Commodity P&L":
+        _render_pnl_calendar_page("COMMODITY")
         return
     if selected_page == "Security":
         _render_security_page(session)
@@ -2254,7 +2288,45 @@ def main() -> None:
         _render_settings_page(session)
         return
 
-    st.markdown("## :material/candlestick_chart: Zerodha live trade control center")
+    if selected_page == "Live dashboard":
+        st.markdown("## :material/candlestick_chart: Live dashboard")
+        live_left, live_right = st.columns([2.2, 1.2])
+        with live_left:
+            st.caption("Live charts, signals, positions, and execution events.")
+        with live_right:
+            now_str = datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST")
+            st.caption(f":material/schedule: {now_str}")
+
+        trade_mode = str(st.session_state.get("trade_execution_mode", "PAPER"))
+        real_mode_armed = bool(st.session_state.get("real_mode_armed", False))
+        expiry_mode = str(st.session_state.get("index_expiry_mode", "Next week"))
+        commodity_expiry_mode = str(st.session_state.get("commodity_expiry_mode", "Current month"))
+        expiry_week_offset = 1 if expiry_mode == "Next week" else 0
+        commodity_expiry_offset = 1 if commodity_expiry_mode == "Next month" else 0
+        reconciliation_required = any(
+            bool(state.get("reconciliation_required"))
+            for state in st.session_state.engine_state.values()
+        )
+        effective_real_mode_armed = (
+            real_mode_armed
+            and _runtime_allows_live_orders()
+            and not reconciliation_required
+        )
+        st.caption(
+            f"Execution: {trade_mode} · index expiry: {expiry_mode} · "
+            f"commodity expiry: {commodity_expiry_mode}. Change these on Trade controls."
+        )
+        _persist_engine_state(st.session_state.engine_state)
+        _render_live_engine(
+            trade_mode,
+            effective_real_mode_armed,
+            expiry_week_offset,
+            commodity_expiry_offset,
+        )
+        return
+
+    st.markdown("## :material/tune: Trade controls")
+    st.info("Configure execution here, then keep Live dashboard open while the trading engine is running.")
     if _is_cloud_runtime():
         if _cloud_live_orders_enabled():
             st.error(
@@ -2268,13 +2340,13 @@ def main() -> None:
             )
     h1, h2 = st.columns([2.2, 1.2])
     with h1:
-        st.caption("Direct Zerodha data feed, dual-underlying execution, and in-session risk tracking.")
+        st.caption("Connection, execution, expiry, position sizing, and risk settings.")
     with h2:
         now_str = datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST")
         st.caption(f":material/schedule: {now_str}")
 
     with st.container(border=True):
-        st.subheader(":material/vpn_key: 1) API login and connection")
+        st.subheader(":material/vpn_key: API login and connection")
         if st.session_state.connected:
             c1, c2 = st.columns([2.2, 1.0])
             with c1:
@@ -2384,7 +2456,7 @@ def main() -> None:
             st.info("Connection status: NOT CONNECTED")
 
     with st.container(border=True):
-        st.subheader(":material/tune: 2) Trade controls")
+        st.subheader(":material/tune: Instrument controls")
         if st.button("Refresh now", width="stretch"):
             st.rerun()
 
@@ -2662,20 +2734,7 @@ def main() -> None:
                     st.caption(f"Edit the {name} values, then press Save {name} settings to apply them.")
 
     _persist_engine_state(st.session_state.engine_state)
-    effective_real_mode_armed = (
-        bool(real_mode_armed)
-        and _runtime_allows_live_orders()
-        and not any(
-            bool(state.get("reconciliation_required"))
-            for state in st.session_state.engine_state.values()
-        )
-    )
-    _render_live_engine(
-        str(trade_mode),
-        effective_real_mode_armed,
-        expiry_week_offset,
-        commodity_expiry_offset,
-    )
+    st.success("Controls saved. Open Live dashboard to run and monitor the trading engine.")
 
 
 if __name__ == "__main__":

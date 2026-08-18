@@ -11,7 +11,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from aadithya_quantlab.zerodha_live_trading.persistence import runtime_path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DATABASE_PATH = runtime_path("quantlab.db")
 
 
@@ -171,6 +171,16 @@ class Database:
                     ALTER TABLE daily_pnl ADD COLUMN silver_pnl REAL NOT NULL DEFAULT 0;
                     """
                 )
+                connection.execute("PRAGMA user_version = 2")
+                version = 2
+            if version < 3:
+                connection.execute(
+                    "ALTER TABLE trades ADD COLUMN strategy TEXT NOT NULL DEFAULT 'LEGACY_UNKNOWN'"
+                )
+                connection.execute(
+                    "UPDATE trades SET strategy='HEIKIN_ASHI_REVERSAL' "
+                    "WHERE exit_reason='HA_COLOR_REVERSAL'"
+                )
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def fetch_one(self, query: str, parameters: Sequence[Any] = ()) -> dict[str, Any] | None:
@@ -319,14 +329,16 @@ class Database:
             connection.execute(
                 """INSERT INTO trades(
                     trade_key,trade_date,mode,underlying,option_symbol,side,quantity,entry_time,
-                    entry_price,entry_order_id,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    entry_price,entry_order_id,created_at,updated_at,strategy
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(trade_key) DO UPDATE SET
-                    entry_order_id=COALESCE(excluded.entry_order_id,trades.entry_order_id), updated_at=excluded.updated_at""",
+                    entry_order_id=COALESCE(excluded.entry_order_id,trades.entry_order_id),
+                    strategy=excluded.strategy,updated_at=excluded.updated_at""",
                 (
                     trade["trade_key"], trade["trade_date"], trade["mode"], trade["underlying"],
                     trade["option_symbol"], trade["side"], int(trade["quantity"]), trade["entry_time"],
                     float(trade["entry_price"]), trade.get("entry_order_id"), now, now,
+                    str(trade.get("strategy") or "EMA_3_30"),
                 ),
             )
             row = connection.execute("SELECT id FROM trades WHERE trade_key=?", (trade["trade_key"],)).fetchone()
@@ -341,6 +353,7 @@ class Database:
         realized_pnl: float,
         exit_order_id: str | None,
         exit_reason: str,
+        strategy: str | None = None,
     ) -> None:
         now = utc_now_iso()
         with self.transaction() as connection:
@@ -350,8 +363,11 @@ class Database:
             if current["exit_time"] is None:
                 connection.execute(
                     "UPDATE trades SET exit_time=?,exit_price=?,realized_pnl=?,exit_order_id=?,"
-                    "exit_reason=?,updated_at=? WHERE id=?",
-                    (exit_time, float(exit_price), float(realized_pnl), exit_order_id, exit_reason, now, trade_id),
+                    "exit_reason=?,strategy=COALESCE(?,strategy),updated_at=? WHERE id=?",
+                    (
+                        exit_time, float(exit_price), float(realized_pnl), exit_order_id,
+                        exit_reason, strategy, now, trade_id,
+                    ),
                 )
             self._refresh_daily_pnl(connection, str(current["trade_date"]), str(current["mode"]), now)
 
@@ -414,24 +430,30 @@ class Database:
         )
 
     def daily_pnl(self, start_date: str, end_date: str, mode: str = "ALL", underlying: str = "ALL") -> list[dict[str, Any]]:
-        pnl_expression = "total_pnl"
-        if underlying.upper() == "NIFTY":
-            pnl_expression = "nifty_pnl"
-        elif underlying.upper() == "SENSEX":
-            pnl_expression = "sensex_pnl"
-        elif underlying.upper() in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"}:
-            pnl_expression = f"{underlying.lower()}_pnl"
-        clauses, parameters = ["trade_date BETWEEN ? AND ?"], [start_date, end_date]
+        selected = underlying.upper()
+        clauses, parameters = ["trade_date BETWEEN ? AND ?", "exit_time IS NOT NULL"], [start_date, end_date]
         if mode.upper() != "ALL":
             clauses.append("mode=?")
             parameters.append(mode.upper())
+        if selected == "INDEX":
+            clauses.append("underlying IN ('NIFTY','SENSEX')")
+        elif selected == "COMMODITY":
+            clauses.append("underlying IN ('CRUDEOIL','NATURALGAS','GOLD','SILVER')")
+        elif selected != "ALL":
+            clauses.append("underlying=?")
+            parameters.append(selected)
         return self.fetch_all(
-            f"""SELECT trade_date,SUM(nifty_pnl) nifty_pnl,SUM(sensex_pnl) sensex_pnl,
-                SUM(crudeoil_pnl) crudeoil_pnl,SUM(naturalgas_pnl) naturalgas_pnl,
-                SUM(gold_pnl) gold_pnl,SUM(silver_pnl) silver_pnl,
-                SUM({pnl_expression}) total_pnl,SUM(trade_count) trade_count,
-                SUM(winning_trades) winning_trades,SUM(losing_trades) losing_trades
-                FROM daily_pnl WHERE {' AND '.join(clauses)} GROUP BY trade_date ORDER BY trade_date""",
+            f"""SELECT trade_date,
+                COALESCE(SUM(CASE WHEN underlying='NIFTY' THEN realized_pnl ELSE 0 END),0) nifty_pnl,
+                COALESCE(SUM(CASE WHEN underlying='SENSEX' THEN realized_pnl ELSE 0 END),0) sensex_pnl,
+                COALESCE(SUM(CASE WHEN underlying='CRUDEOIL' THEN realized_pnl ELSE 0 END),0) crudeoil_pnl,
+                COALESCE(SUM(CASE WHEN underlying='NATURALGAS' THEN realized_pnl ELSE 0 END),0) naturalgas_pnl,
+                COALESCE(SUM(CASE WHEN underlying='GOLD' THEN realized_pnl ELSE 0 END),0) gold_pnl,
+                COALESCE(SUM(CASE WHEN underlying='SILVER' THEN realized_pnl ELSE 0 END),0) silver_pnl,
+                COALESCE(SUM(realized_pnl),0) total_pnl,COUNT(*) trade_count,
+                SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) winning_trades,
+                SUM(CASE WHEN realized_pnl<0 THEN 1 ELSE 0 END) losing_trades
+                FROM trades WHERE {' AND '.join(clauses)} GROUP BY trade_date ORDER BY trade_date""",
             parameters,
         )
 

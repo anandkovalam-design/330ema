@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -136,7 +137,10 @@ def test_owner_can_create_and_disable_viewer(
     assert service.validate_session(token)["role"] == "USER"
     assert database.list_users("USER")[0]["username"] == "viewer@example.com"
     assert "password_hash" not in database.list_users("USER")[0]
-    assert _navigation_pages_for_role("USER") == ["Positions", "Trade history", "P&L calendar"]
+    assert _navigation_pages_for_role("USER") == [
+        "Positions", "Trade history", "Index P&L", "Commodity P&L"
+    ]
+    assert "Trade controls" in _navigation_pages_for_role("OWNER")
     assert "Security" in _navigation_pages_for_role("OWNER")
 
     revoked = service.set_viewer_active(owner_session, viewer_id, False)
@@ -207,6 +211,7 @@ def _trade(key: str, underlying: str = "NIFTY", pnl_date: str = "2026-08-14") ->
         "entry_time": f"{pnl_date}T09:30:00+05:30",
         "entry_price": 100.0,
         "entry_order_id": "PAPER",
+        "strategy": "EMA_3_30",
     }
 
 
@@ -248,6 +253,7 @@ def test_database_and_trade_persistence_daily_aggregation_and_duplicate_preventi
     trades = reopened.list_trades(start_date="2026-08-14", end_date="2026-08-14")
     daily = reopened.daily_pnl("2026-08-01", "2026-08-31")[0]
     assert len(trades) == 2
+    assert {trade["strategy"] for trade in trades} == {"EMA_3_30"}
     assert daily["nifty_pnl"] == 250.0
     assert daily["sensex_pnl"] == -500.0
     assert daily["total_pnl"] == -250.0
@@ -269,6 +275,72 @@ def test_database_accepts_and_aggregates_mcx_commodity_trades(tmp_path: Path) ->
     daily = database.daily_pnl("2026-08-14", "2026-08-14", underlying="GOLD")[0]
     assert daily["gold_pnl"] == 500.0
     assert daily["total_pnl"] == 500.0
+
+
+def test_version_two_database_migrates_trade_strategy_without_losing_rows(tmp_path: Path) -> None:
+    path = tmp_path / "version-two.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_key TEXT NOT NULL UNIQUE,
+                trade_date TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                underlying TEXT NOT NULL,
+                option_symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                entry_time TEXT NOT NULL,
+                exit_time TEXT,
+                entry_price REAL NOT NULL,
+                exit_price REAL,
+                realized_pnl REAL,
+                entry_order_id TEXT,
+                exit_order_id TEXT,
+                exit_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO trades(
+                trade_key,trade_date,mode,underlying,option_symbol,side,quantity,
+                entry_time,entry_price,created_at,updated_at
+            ) VALUES(
+                'legacy','2026-08-14','PAPER','NIFTY','NFO:NIFTYTESTCE','CALL',10,
+                '2026-08-14T09:30:00+05:30',100,'2026-08-14T04:00:00+00:00','2026-08-14T04:00:00+00:00'
+            );
+            PRAGMA user_version = 2;
+            """
+        )
+
+    database = Database(path)
+    assert database.list_trades()[0]["strategy"] == "LEGACY_UNKNOWN"
+    with database.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_index_and_commodity_pnl_are_aggregated_separately(tmp_path: Path) -> None:
+    database = Database(tmp_path / "split-pnl.db")
+    for key, underlying, realized_pnl in (
+        ("nifty-1", "NIFTY", 250.0),
+        ("gold-1", "GOLD", -500.0),
+    ):
+        trade_id = database.upsert_open_trade(_trade(key, underlying))
+        database.complete_trade(
+            trade_id,
+            exit_time="2026-08-14T15:00:00+05:30",
+            exit_price=100.0,
+            realized_pnl=realized_pnl,
+            exit_order_id=None,
+            exit_reason="TEST",
+        )
+
+    index = database.daily_pnl("2026-08-14", "2026-08-14", underlying="INDEX")[0]
+    commodity = database.daily_pnl("2026-08-14", "2026-08-14", underlying="COMMODITY")[0]
+    assert index["total_pnl"] == 250.0
+    assert index["trade_count"] == 1
+    assert commodity["total_pnl"] == -500.0
+    assert commodity["trade_count"] == 1
 
 
 @pytest.mark.parametrize(
