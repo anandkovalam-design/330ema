@@ -24,6 +24,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _load_login_credentials,
     _load_risk_settings,
     _mcx_order_quantity,
+    MCX_CONTRACT_SPECS,
     _run_parallel_index_engines,
     _sync_scaled_metal_risk_settings,
     _run_engine_for,
@@ -140,6 +141,13 @@ def test_all_mcx_commodities_treat_live_lot_size_one_as_one_contract_lot() -> No
         assert lots == 3
         assert broker_lot_size == 1
         assert order_quantity == 3
+
+
+def test_mcx_display_contract_sizes_are_separate_from_broker_quantity() -> None:
+    assert MCX_CONTRACT_SPECS["CRUDEOIL"] == (100, "barrels")
+    assert MCX_CONTRACT_SPECS["NATURALGAS"] == (1250, "MMBtu")
+    assert MCX_CONTRACT_SPECS["GOLD"] == (100, "x 10 g = 1 kg")
+    assert MCX_CONTRACT_SPECS["SILVER"] == (30, "kg")
 
 
 def test_standalone_dashboard_entry_point() -> None:
