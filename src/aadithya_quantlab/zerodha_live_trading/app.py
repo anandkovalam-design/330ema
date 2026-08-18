@@ -1903,6 +1903,36 @@ def _init_session_state() -> None:
                 _clear_saved_connection()
 
 
+def _has_real_trade_recovery(engine_state: dict[str, dict[str, Any]]) -> bool:
+    return any(
+        bool(state.get("reconciliation_required"))
+        or (
+            isinstance(state.get("open_trade"), dict)
+            and str(state["open_trade"].get("trade_mode", "PAPER")).upper() == "REAL"
+        )
+        for state in engine_state.values()
+    )
+
+
+def _reset_durable_paper_trade_state() -> None:
+    """Reset PAPER state in a pre-rerun callback so widget keys remain writable."""
+
+    if _has_real_trade_recovery(st.session_state.engine_state):
+        st.session_state.paper_reset_error = (
+            "Recovered REAL activity must be reconciled before PAPER state can be reset."
+        )
+        return
+    st.session_state.engine_state = {
+        name: _default_state_for(cfg) for name, cfg in UNDERLYINGS.items()
+    }
+    for name in UNDERLYINGS:
+        st.session_state[f"{name.lower()}_turn_off"] = False
+    st.session_state.recovery_metadata = {}
+    st.session_state.reconciliation_report = None
+    _persist_engine_state(st.session_state.engine_state)
+    st.session_state.paper_reset_completed = True
+
+
 def _client_context() -> ClientContext:
     try:
         headers = dict(st.context.headers)
@@ -2640,27 +2670,19 @@ def main() -> None:
 
         _, reset_column, _ = st.columns(3)
         with reset_column:
-            has_real_recovery = any(
-                bool(state.get("reconciliation_required"))
-                or (
-                    isinstance(state.get("open_trade"), dict)
-                    and str(state["open_trade"].get("trade_mode", "PAPER")).upper() == "REAL"
-                )
-                for state in st.session_state.engine_state.values()
-            )
-            if st.button(
+            has_real_recovery = _has_real_trade_recovery(st.session_state.engine_state)
+            st.button(
                 "Reset durable PAPER trade state",
                 width="stretch",
                 disabled=has_real_recovery,
                 help="Reconcile broker activity before resetting recovered REAL state." if has_real_recovery else None,
-            ):
-                st.session_state.engine_state = {
-                    name: _default_state_for(cfg) for name, cfg in UNDERLYINGS.items()
-                }
-                for name in UNDERLYINGS:
-                    st.session_state[f"{name.lower()}_turn_off"] = False
-                _persist_engine_state(st.session_state.engine_state)
+                on_click=_reset_durable_paper_trade_state,
+            )
+            if st.session_state.pop("paper_reset_completed", False):
                 st.success("Durable PAPER engine state reset for all instruments.")
+            reset_error = st.session_state.pop("paper_reset_error", "")
+            if reset_error:
+                st.error(reset_error)
 
         with st.expander("Trailing stop settings", expanded=True):
             for name in UNDERLYINGS:

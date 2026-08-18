@@ -19,6 +19,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _entries_blocked_for_expiry_day,
     _front_future_row,
     _format_ist_timestamp,
+    _has_real_trade_recovery,
     _has_opposite_heikin_ashi_candle,
     _latest_confirmed_heikin_ashi_signal,
     _contract_lot_size,
@@ -28,6 +29,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _trade_pnl_quantity,
     MCX_CONTRACT_SPECS,
     _run_parallel_index_engines,
+    _reset_durable_paper_trade_state,
     _sync_scaled_metal_risk_settings,
     _run_engine_for,
     _select_option_contract,
@@ -68,6 +70,40 @@ def test_trade_history_displays_human_readable_strategy() -> None:
     )
 
     assert frame.loc[0, "strategy"] == "Heikin-Ashi reversal"
+
+
+class _FakeSessionState(dict):
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
+
+
+def test_durable_paper_reset_callback_runs_before_widget_render(monkeypatch) -> None:
+    fake_state = _FakeSessionState(
+        engine_state={
+            name: {**_default_state_for(config), "enabled": False, "trades_taken": 2}
+            for name, config in UNDERLYINGS.items()
+        },
+        recovery_metadata={"saved_at": "2026-08-18T10:00:00+05:30"},
+        reconciliation_report={"status": "MATCHED"},
+    )
+    persisted = []
+    monkeypatch.setattr(app.st, "session_state", fake_state)
+    monkeypatch.setattr(app, "_persist_engine_state", lambda state: persisted.append(state))
+
+    _reset_durable_paper_trade_state()
+
+    assert fake_state["paper_reset_completed"] is True
+    assert fake_state["recovery_metadata"] == {}
+    assert fake_state["reconciliation_report"] is None
+    assert persisted == [fake_state["engine_state"]]
+    for name in UNDERLYINGS:
+        assert fake_state[f"{name.lower()}_turn_off"] is False
+        assert fake_state["engine_state"][name]["trades_taken"] == 0
+
+
+def test_durable_paper_reset_remains_blocked_for_real_recovery() -> None:
+    engine_state = {"NIFTY": {"reconciliation_required": True}}
+    assert _has_real_trade_recovery(engine_state) is True
 
 
 def test_live_trading_schedule_runs_entries_to_1500_and_exits_at_1515() -> None:
