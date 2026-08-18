@@ -836,6 +836,29 @@ def _trade_pnl_quantity(cfg: UnderlyingConfig, open_trade: dict[str, Any]) -> in
     return broker_quantity * contract_multiplier
 
 
+def _mcx_contract_size_label(name: str, lots: int) -> str:
+    normalized_lots = max(1, int(lots))
+    contract_multiplier, contract_unit = MCX_CONTRACT_SPECS[name]
+    if name == "GOLD":
+        return f"{normalized_lots * contract_multiplier} x 10 g = {normalized_lots} kg"
+    return f"{normalized_lots * contract_multiplier} {contract_unit}"
+
+
+def _mcx_position_size_details(
+    name: str,
+    state: dict[str, Any],
+    open_trade: dict[str, Any],
+) -> tuple[int, int, str]:
+    broker_quantity = max(1, int(open_trade.get("quantity", 1)))
+    broker_lot_size = max(
+        1,
+        int(open_trade.get("exchange_lot_size", state.get("lot_size", 1)) or 1),
+    )
+    inferred_lots = max(1, broker_quantity // broker_lot_size)
+    lots = max(1, int(open_trade.get("lots", inferred_lots)))
+    return lots, broker_quantity, _mcx_contract_size_label(name, lots)
+
+
 def _extract_ltp(kite: KiteConnect, instrument: str) -> float:
     payload = kite.ltp(instrument)
     info = payload.get(instrument)
@@ -1650,11 +1673,8 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
                 )
                 inferred_lots = max(1, trade_quantity // max(1, broker_lot_size))
                 trade_lots = int(open_trade.get("lots", inferred_lots))
-                contract_multiplier, contract_unit = MCX_CONTRACT_SPECS[cfg.name]
                 st.write(f"MCX lots: {trade_lots}")
-                st.write(
-                    f"Contract size: {contract_multiplier * trade_lots} {contract_unit}"
-                )
+                st.write(f"Contract size: {_mcx_contract_size_label(cfg.name, trade_lots)}")
                 st.write(f"Broker order quantity: {trade_quantity}")
                 st.caption(
                     f"Zerodha instrument-master lot_size: {broker_lot_size}. "
@@ -2032,7 +2052,17 @@ def _render_positions_page() -> None:
                 continue
             with st.container(horizontal=True):
                 st.metric("Symbol", str(open_trade.get("instrument", "")), border=True)
-                st.metric("Quantity", int(open_trade.get("quantity", 0)), border=True)
+                if name in COMMODITY_NAMES:
+                    lots, broker_quantity, contract_size = _mcx_position_size_details(
+                        name, state, open_trade
+                    )
+                    st.metric("MCX lots", f"{lots} lot{'s' if lots != 1 else ''}", border=True)
+                    st.metric("Broker quantity", broker_quantity, border=True)
+                    st.metric("Contract size", contract_size, border=True)
+                else:
+                    st.metric("Lots", int(open_trade.get("lots", 0)), border=True)
+                    st.metric("Broker quantity", int(open_trade.get("quantity", 0)), border=True)
+            with st.container(horizontal=True):
                 st.metric("Entry", _format_inr(open_trade.get("entry_option")), border=True)
                 st.metric("LTP", _format_inr(open_trade.get("ltp")), border=True)
                 st.metric("Unrealized P&L", _format_inr(open_trade.get("unrealized")), border=True)
@@ -2648,16 +2678,14 @@ def main() -> None:
                         st.caption(f"Lots: {lots} · broker order quantity: {state['quantity']}")
                     elif state.get("lot_size"):
                         broker_lot_size = int(state["lot_size"])
-                        contract_multiplier, contract_unit = MCX_CONTRACT_SPECS[name]
                         st.caption(
                             f"MCX lots: {lots} · broker order quantity: {lots * broker_lot_size} · "
-                            f"contract size: {lots * contract_multiplier} {contract_unit} · "
+                            f"contract size: {_mcx_contract_size_label(name, lots)} · "
                             f"Zerodha lot_size: {broker_lot_size}"
                         )
                     else:
-                        contract_multiplier, contract_unit = MCX_CONTRACT_SPECS[name]
                         st.caption(
-                            f"Contract size: {lots * contract_multiplier} {contract_unit}. "
+                            f"Contract size: {_mcx_contract_size_label(name, lots)}. "
                             "Broker order quantity resolves from the selected MCX option's live Zerodha lot_size."
                         )
                     max_trades = st.number_input(

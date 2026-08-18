@@ -27,6 +27,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _load_login_credentials,
     _load_risk_settings,
     _mcx_order_quantity,
+    _mcx_position_size_details,
     _trade_pnl_quantity,
     MCX_CONTRACT_SPECS,
     _run_parallel_index_engines,
@@ -120,6 +121,19 @@ def test_mcx_schedule_runs_entries_to_2230_and_exits_at_2250() -> None:
     for name in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"):
         assert UNDERLYINGS[name].entry_cutoff_ist == "22:30"
         assert UNDERLYINGS[name].mandatory_exit_ist == "22:50"
+
+
+def test_mcx_position_size_separates_lots_broker_quantity_and_contract_size() -> None:
+    state = {"lot_size": 1}
+    silver = _mcx_position_size_details(
+        "SILVER", state, {"quantity": 1, "lots": 1, "exchange_lot_size": 1}
+    )
+    crude = _mcx_position_size_details(
+        "CRUDEOIL", state, {"quantity": 1, "lots": 1, "exchange_lot_size": 1}
+    )
+
+    assert silver == (1, 1, "30 kg")
+    assert crude == (1, 1, "100 barrels")
 
 
 def test_gold_and_silver_point_values_scale_from_nifty_defaults() -> None:
