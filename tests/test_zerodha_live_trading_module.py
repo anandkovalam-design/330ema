@@ -5,6 +5,7 @@ from aadithya_quantlab.zerodha_live_trading import main
 from aadithya_quantlab.zerodha_live_trading import app
 from aadithya_quantlab.zerodha_live_trading.app import (
     ENTRY_CUTOFF_IST,
+    DEFAULT_INDEX_EXPIRY_MODE,
     HEIKIN_ASHI_STOP_POINTS,
     MANDATORY_EXIT_IST,
     STRATEGY_HEIKIN_ASHI,
@@ -109,6 +110,10 @@ def test_durable_paper_reset_remains_blocked_for_real_recovery() -> None:
 def test_live_trading_schedule_runs_entries_to_1500_and_exits_at_1515() -> None:
     assert ENTRY_CUTOFF_IST == "15:00"
     assert MANDATORY_EXIT_IST == "15:15"
+
+
+def test_nifty_and_sensex_default_to_current_week_expiry() -> None:
+    assert DEFAULT_INDEX_EXPIRY_MODE == "Current week"
 
 
 def test_mcx_schedule_runs_entries_to_2230_and_exits_at_2250() -> None:

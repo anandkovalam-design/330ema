@@ -49,6 +49,7 @@ STRATEGY_EMA = "EMA_3_30"
 STRATEGY_HEIKIN_ASHI = "HEIKIN_ASHI_REVERSAL"
 HEIKIN_ASHI_PROFIT_GATE_POINTS = 10.0
 HEIKIN_ASHI_STOP_POINTS = 20.0
+DEFAULT_INDEX_EXPIRY_MODE = "Current week"
 
 
 @st.cache_resource
@@ -2329,7 +2330,7 @@ def main() -> None:
 
         trade_mode = str(st.session_state.get("trade_execution_mode", "PAPER"))
         real_mode_armed = bool(st.session_state.get("real_mode_armed", False))
-        expiry_mode = str(st.session_state.get("index_expiry_mode", "Next week"))
+        expiry_mode = str(st.session_state.get("index_expiry_mode", DEFAULT_INDEX_EXPIRY_MODE))
         commodity_expiry_mode = str(st.session_state.get("commodity_expiry_mode", "Current month"))
         expiry_week_offset = 1 if expiry_mode == "Next week" else 0
         commodity_expiry_offset = 1 if commodity_expiry_mode == "Next month" else 0
@@ -2604,7 +2605,7 @@ def main() -> None:
             expiry_mode = st.segmented_control(
                 "NIFTY and SENSEX expiry",
                 options=["Current week", "Next week"],
-                default="Next week",
+                default=DEFAULT_INDEX_EXPIRY_MODE,
                 key="index_expiry_mode",
             )
         with commodity_expiry_column:
