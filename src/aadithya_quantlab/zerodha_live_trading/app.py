@@ -68,6 +68,7 @@ class UnderlyingConfig:
     default_sl_points: float
     default_lots: int = 1
     lot_step: int = 1
+    risk_point_multiplier: float = 1.0
     signal_source: str = "SPOT"
     entry_start_ist: str = ENTRY_START_IST
     entry_cutoff_ist: str = ENTRY_CUTOFF_IST
@@ -111,13 +112,15 @@ UNDERLYINGS: dict[str, UnderlyingConfig] = {
     ),
     "GOLD": UnderlyingConfig(
         name="GOLD", spot_instrument_token=None, option_symbol_prefix="GOLD",
-        option_exchange="MCX", expiry_weekday=None, default_qty=1, default_sl_points=20.0,
+        option_exchange="MCX", expiry_weekday=None, default_qty=1, default_sl_points=120.0,
+        risk_point_multiplier=6.0,
         signal_source="FRONT_FUTURE", entry_start_ist="09:00", entry_cutoff_ist="22:30",
         mandatory_exit_ist="22:50",
     ),
     "SILVER": UnderlyingConfig(
         name="SILVER", spot_instrument_token=None, option_symbol_prefix="SILVER",
-        option_exchange="MCX", expiry_weekday=None, default_qty=1, default_sl_points=20.0,
+        option_exchange="MCX", expiry_weekday=None, default_qty=1, default_sl_points=200.0,
+        risk_point_multiplier=10.0,
         signal_source="FRONT_FUTURE", entry_start_ist="09:00", entry_cutoff_ist="22:30",
         mandatory_exit_ist="22:50",
     ),
@@ -279,6 +282,29 @@ def _save_risk_settings(engine_state: dict[str, dict[str, Any]]) -> None:
     }
     RISK_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     RISK_SETTINGS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _migrate_scaled_metal_point_values(engine_state: dict[str, dict[str, Any]]) -> bool:
+    """Upgrade untouched legacy GOLD/SILVER point settings to NIFTY-scaled values."""
+    legacy_points = {
+        "sl_points": 20.0,
+        "trail_trigger_points": 15.0,
+        "trail_step_points": 5.0,
+    }
+    migrated = False
+    for name in ("GOLD", "SILVER"):
+        state = engine_state.get(name)
+        if not isinstance(state, dict):
+            continue
+        if not all(
+            abs(_to_float(state.get(key), legacy) - legacy) < 1e-9
+            for key, legacy in legacy_points.items()
+        ):
+            continue
+        multiplier = UNDERLYINGS[name].risk_point_multiplier
+        state.update({key: value * multiplier for key, value in legacy_points.items()})
+        migrated = True
+    return migrated
 
 
 def _save_connection_for_today(api_key: str, access_token: str) -> None:
@@ -748,8 +774,8 @@ def _default_state_for(cfg: UnderlyingConfig) -> dict[str, Any]:
         "sl_to_cost_profit_pct": 0.30,
         "trail_after_profit_pct": 0.50,
         "mfe_giveback_pct": 0.275,
-        "trail_trigger_points": 15.0,
-        "trail_step_points": 5.0,
+        "trail_trigger_points": 15.0 * cfg.risk_point_multiplier,
+        "trail_step_points": 5.0 * cfg.risk_point_multiplier,
         "max_trades": 3,
         "trades_taken": 0,
         "entry_status": "Waiting for market data",
@@ -1400,6 +1426,8 @@ def _init_session_state() -> None:
         st.session_state.engine_state, recovery_metadata = _restore_persistent_engine_state()
         for name, settings in _load_risk_settings().items():
             st.session_state.engine_state[name].update(settings)
+        if _migrate_scaled_metal_point_values(st.session_state.engine_state):
+            _save_risk_settings(st.session_state.engine_state)
         st.session_state.recovery_metadata = recovery_metadata
     else:
         for name, cfg in UNDERLYINGS.items():

@@ -16,6 +16,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _contract_lot_size,
     _load_login_credentials,
     _load_risk_settings,
+    _migrate_scaled_metal_point_values,
     _run_engine_for,
     _select_option_contract,
     _save_login_credentials,
@@ -34,6 +35,38 @@ def test_mcx_schedule_runs_entries_to_2230_and_exits_at_2250() -> None:
     for name in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"):
         assert UNDERLYINGS[name].entry_cutoff_ist == "22:30"
         assert UNDERLYINGS[name].mandatory_exit_ist == "22:50"
+
+
+def test_gold_and_silver_point_values_scale_from_nifty_defaults() -> None:
+    nifty = _default_state_for(UNDERLYINGS["NIFTY"])
+    gold = _default_state_for(UNDERLYINGS["GOLD"])
+    silver = _default_state_for(UNDERLYINGS["SILVER"])
+
+    for key in ("sl_points", "trail_trigger_points", "trail_step_points"):
+        assert gold[key] == nifty[key] * 6
+        assert silver[key] == nifty[key] * 10
+    for key in ("sl_to_cost_profit_pct", "trail_after_profit_pct", "mfe_giveback_pct"):
+        assert gold[key] == nifty[key]
+        assert silver[key] == nifty[key]
+
+
+def test_legacy_gold_and_silver_point_values_are_migrated() -> None:
+    engine_state = {
+        name: _default_state_for(config)
+        for name, config in UNDERLYINGS.items()
+    }
+    for name in ("GOLD", "SILVER"):
+        engine_state[name].update(
+            {"sl_points": 20.0, "trail_trigger_points": 15.0, "trail_step_points": 5.0}
+        )
+
+    assert _migrate_scaled_metal_point_values(engine_state) is True
+    assert engine_state["GOLD"]["sl_points"] == 120.0
+    assert engine_state["GOLD"]["trail_trigger_points"] == 90.0
+    assert engine_state["GOLD"]["trail_step_points"] == 30.0
+    assert engine_state["SILVER"]["sl_points"] == 200.0
+    assert engine_state["SILVER"]["trail_trigger_points"] == 150.0
+    assert engine_state["SILVER"]["trail_step_points"] == 50.0
 
 
 def test_mcx_front_future_and_atm_option_are_resolved_dynamically() -> None:
