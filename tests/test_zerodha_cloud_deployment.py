@@ -111,6 +111,10 @@ def test_engine_state_store_excludes_transient_market_frames(tmp_path: Path) -> 
             "last_signal_ts": "2026-08-13T09:30:00+05:30",
             "trades_taken": 1,
             "realized_pnl": 125.0,
+            "ha_open_trade": {"entry_order_id": "PAPER-HA", "stop_price": 80.0},
+            "ha_last_signal_ts": "2026-08-13T09:35:00+05:30",
+            "ha_trades_taken": 2,
+            "ha_realized_pnl": 50.0,
             "latest_bars": "large-transient-frame",
         }
     }
@@ -126,6 +130,9 @@ def test_engine_state_store_excludes_transient_market_frames(tmp_path: Path) -> 
     assert restored["NIFTY"]["open_trade"]["entry_order_id"] == "PAPER"
     assert restored["NIFTY"]["last_signal_ts"].startswith("2026-08-13")
     assert restored["NIFTY"]["trades_taken"] == 1
+    assert restored["NIFTY"]["ha_open_trade"]["entry_order_id"] == "PAPER-HA"
+    assert restored["NIFTY"]["ha_trades_taken"] == 2
+    assert restored["NIFTY"]["ha_realized_pnl"] == 50.0
     assert "latest_bars" not in restored["NIFTY"]
 
 

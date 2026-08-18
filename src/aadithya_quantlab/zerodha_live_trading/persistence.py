@@ -34,6 +34,13 @@ PERSISTED_ENGINE_FIELDS = (
     "entry_status",
     "reconciliation_required",
     "reconciliation_status",
+    "ha_last_signal_ts",
+    "ha_open_trade",
+    "ha_realized_pnl",
+    "ha_events",
+    "ha_order_logs",
+    "ha_trades_taken",
+    "ha_entry_status",
 )
 
 

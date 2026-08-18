@@ -23,6 +23,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _contract_lot_size,
     _load_login_credentials,
     _load_risk_settings,
+    _run_parallel_index_engines,
     _sync_scaled_metal_risk_settings,
     _run_engine_for,
     _select_option_contract,
@@ -327,6 +328,72 @@ def test_heikin_ashi_trade_exits_on_first_closed_opposite_candle(monkeypatch) ->
     assert result["trades_taken"] == 1
     assert result["realized_pnl"] == 1560.0
     assert any("EXIT HA_COLOR_REVERSAL" in event for event in result["events"])
+
+
+def test_index_runs_ema_and_heikin_ashi_in_parallel_with_independent_modes(monkeypatch) -> None:
+    calls: list[tuple[str, str, bool]] = []
+
+    def fake_run_engine_for(*, engine, trade_mode, real_mode_armed, **kwargs):
+        strategy = str(engine["strategy_mode"])
+        calls.append((strategy, trade_mode, real_mode_armed))
+        if strategy == STRATEGY_HEIKIN_ASHI:
+            engine["open_trade"] = {"instrument": "NFO:NIFTYHACE", "trade_mode": "PAPER"}
+            engine["realized_pnl"] = 25.0
+            engine["trades_taken"] = 4
+            engine["entry_status"] = "HA running"
+        else:
+            engine["open_trade"] = {"instrument": "NFO:NIFTYEMACE", "trade_mode": trade_mode}
+            engine["realized_pnl"] = 50.0
+            engine["trades_taken"] = 2
+            engine["entry_status"] = "EMA running"
+        return engine
+
+    monkeypatch.setattr(app, "_run_engine_for", fake_run_engine_for)
+    engine = _default_state_for(UNDERLYINGS["NIFTY"])
+
+    result = _run_parallel_index_engines(
+        object(), UNDERLYINGS["NIFTY"], engine,
+        wall_time(9, 16), wall_time(15, 0), wall_time(15, 15), 1, "REAL", True,
+    )
+
+    assert calls == [
+        (app.STRATEGY_EMA, "REAL", True),
+        (STRATEGY_HEIKIN_ASHI, "PAPER", False),
+    ]
+    assert result["open_trade"]["instrument"] == "NFO:NIFTYEMACE"
+    assert result["ha_open_trade"]["instrument"] == "NFO:NIFTYHACE"
+    assert result["realized_pnl"] == 50.0
+    assert result["ha_realized_pnl"] == 25.0
+    assert result["trades_taken"] == 2
+    assert result["ha_trades_taken"] == 4
+
+
+def test_parallel_upgrade_preserves_an_existing_heikin_ashi_position(monkeypatch) -> None:
+    seen_open_trades: list[tuple[str, object]] = []
+
+    def fake_run_engine_for(*, engine, **kwargs):
+        seen_open_trades.append((str(engine["strategy_mode"]), engine.get("open_trade")))
+        return engine
+
+    monkeypatch.setattr(app, "_run_engine_for", fake_run_engine_for)
+    engine = _default_state_for(UNDERLYINGS["NIFTY"])
+    engine["strategy_mode"] = STRATEGY_HEIKIN_ASHI
+    engine["last_signal_ts"] = "2026-08-19T09:50:00+05:30"
+    engine["open_trade"] = {
+        "instrument": "NFO:NIFTYHACE",
+        "strategy_mode": STRATEGY_HEIKIN_ASHI,
+        "trade_mode": "PAPER",
+    }
+
+    result = _run_parallel_index_engines(
+        object(), UNDERLYINGS["NIFTY"], engine,
+        wall_time(9, 16), wall_time(15, 0), wall_time(15, 15), 1, "PAPER", False,
+    )
+
+    assert seen_open_trades[0] == (app.STRATEGY_EMA, None)
+    assert seen_open_trades[1][0] == STRATEGY_HEIKIN_ASHI
+    assert seen_open_trades[1][1]["instrument"] == "NFO:NIFTYHACE"
+    assert result["ha_open_trade"]["instrument"] == "NFO:NIFTYHACE"
 
 
 def test_trailing_stop_moves_to_cost_and_never_moves_down() -> None:
