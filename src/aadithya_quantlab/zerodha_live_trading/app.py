@@ -164,10 +164,12 @@ RISK_SETTING_KEYS = (
     "trail_step_points",
 )
 
+UNIVERSAL_TRAIL_START_PCT = 0.30
+
 NATURAL_GAS_RISK_DEFAULTS = {
     "sl_points": 2.0,
     "sl_to_cost_profit_pct": 0.25,
-    "trail_after_profit_pct": 0.35,
+    "trail_after_profit_pct": UNIVERSAL_TRAIL_START_PCT,
     "mfe_giveback_pct": 0.275,
     "trail_trigger_points": 3.0,
     "trail_step_points": 1.0,
@@ -351,6 +353,17 @@ def _migrate_natural_gas_risk_defaults(engine_state: dict[str, dict[str, Any]]) 
         return False
     state.update(NATURAL_GAS_RISK_DEFAULTS)
     return True
+
+
+def _enforce_universal_trail_start(engine_state: dict[str, dict[str, Any]]) -> bool:
+    changed = False
+    for state in engine_state.values():
+        if not isinstance(state, dict):
+            continue
+        if abs(_to_float(state.get("trail_after_profit_pct"), 0.0) - UNIVERSAL_TRAIL_START_PCT) >= 1e-9:
+            state["trail_after_profit_pct"] = UNIVERSAL_TRAIL_START_PCT
+            changed = True
+    return changed
 
 
 def _save_connection_for_today(api_key: str, access_token: str) -> None:
@@ -953,7 +966,7 @@ def _default_state_for(cfg: UnderlyingConfig) -> dict[str, Any]:
     risk_defaults = {
         "sl_points": cfg.default_sl_points,
         "sl_to_cost_profit_pct": 0.30,
-        "trail_after_profit_pct": 0.50,
+        "trail_after_profit_pct": UNIVERSAL_TRAIL_START_PCT,
         "mfe_giveback_pct": 0.275,
         "trail_trigger_points": 15.0 * cfg.risk_point_multiplier,
         "trail_step_points": 5.0 * cfg.risk_point_multiplier,
@@ -1229,7 +1242,7 @@ def _update_trailing_stop(open_trade: dict[str, Any], engine: dict[str, Any], lt
     max_ltp = max(_to_float(open_trade.get("max_ltp"), entry), ltp)
     open_trade["max_ltp"] = max_ltp
     sl_to_cost_pct = max(0.0, _to_float(engine.get("sl_to_cost_profit_pct"), 0.30))
-    trail_after_pct = max(sl_to_cost_pct, _to_float(engine.get("trail_after_profit_pct"), 0.50))
+    trail_after_pct = max(sl_to_cost_pct, UNIVERSAL_TRAIL_START_PCT)
     giveback_pct = min(max(_to_float(engine.get("mfe_giveback_pct"), 0.275), 0.0), 1.0)
     trigger_points = max(_to_float(engine.get("trail_trigger_points"), 15.0), 0.01)
     step_points = max(_to_float(engine.get("trail_step_points"), 5.0), 0.0)
@@ -1934,6 +1947,8 @@ def _init_session_state() -> None:
     if _migrate_natural_gas_risk_defaults(st.session_state.engine_state):
         _save_risk_settings(st.session_state.engine_state)
     if _sync_scaled_metal_risk_settings(st.session_state.engine_state):
+        _save_risk_settings(st.session_state.engine_state)
+    if _enforce_universal_trail_start(st.session_state.engine_state):
         _save_risk_settings(st.session_state.engine_state)
     for name in UNDERLYINGS:
         toggle_key = f"{name.lower()}_turn_off"
@@ -2775,8 +2790,8 @@ def main() -> None:
                     )
                     trail_after_pct = t3.number_input(
                         f"{name} trail starts %", min_value=1.0, max_value=300.0,
-                        value=_to_float(state.get("trail_after_profit_pct"), 0.50) * 100.0, step=1.0,
-                        disabled=linked_to_nifty,
+                        value=UNIVERSAL_TRAIL_START_PCT * 100.0, step=1.0,
+                        disabled=True,
                     )
                     t4, t5, t6 = st.columns(3)
                     giveback_pct = t4.number_input(
@@ -2805,7 +2820,7 @@ def main() -> None:
                         {
                             "sl_points": float(sl_points),
                             "sl_to_cost_profit_pct": float(sl_to_cost_pct) / 100.0,
-                            "trail_after_profit_pct": float(trail_after_pct) / 100.0,
+                            "trail_after_profit_pct": UNIVERSAL_TRAIL_START_PCT,
                             "mfe_giveback_pct": float(giveback_pct) / 100.0,
                             "trail_trigger_points": float(trigger_points),
                             "trail_step_points": float(step_points),

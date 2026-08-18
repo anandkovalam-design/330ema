@@ -17,6 +17,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _credential_preview,
     _clear_login_credentials,
     _default_state_for,
+    _enforce_universal_trail_start,
     _entries_blocked_for_expiry_day,
     _front_future_row,
     _format_ist_timestamp,
@@ -129,7 +130,7 @@ def test_natural_gas_uses_dedicated_risk_defaults() -> None:
 
     assert state["sl_points"] == 2.0
     assert state["sl_to_cost_profit_pct"] == 0.25
-    assert state["trail_after_profit_pct"] == 0.35
+    assert state["trail_after_profit_pct"] == 0.30
     assert state["mfe_giveback_pct"] == 0.275
     assert state["trail_trigger_points"] == 3.0
     assert state["trail_step_points"] == 1.0
@@ -150,7 +151,7 @@ def test_natural_gas_legacy_defaults_are_migrated_without_overwriting_custom_val
     assert legacy_state["NATURALGAS"] == {
         "sl_points": 2.0,
         "sl_to_cost_profit_pct": 0.25,
-        "trail_after_profit_pct": 0.35,
+        "trail_after_profit_pct": 0.30,
         "mfe_giveback_pct": 0.275,
         "trail_trigger_points": 3.0,
         "trail_step_points": 1.0,
@@ -185,6 +186,17 @@ def test_gold_and_silver_point_values_scale_from_nifty_defaults() -> None:
     for key in ("sl_to_cost_profit_pct", "trail_after_profit_pct", "mfe_giveback_pct"):
         assert gold[key] == nifty[key]
         assert silver[key] == nifty[key]
+
+
+def test_trailing_start_is_normalized_to_30_percent_for_every_instrument() -> None:
+    engine_state = {
+        name: {**_default_state_for(config), "trail_after_profit_pct": 0.75}
+        for name, config in UNDERLYINGS.items()
+    }
+
+    assert _enforce_universal_trail_start(engine_state) is True
+    assert all(state["trail_after_profit_pct"] == 0.30 for state in engine_state.values())
+    assert _enforce_universal_trail_start(engine_state) is False
 
 
 def test_gold_and_silver_risk_values_always_follow_nifty() -> None:
@@ -584,13 +596,25 @@ def test_parallel_upgrade_preserves_an_existing_heikin_ashi_position(monkeypatch
 
 
 def test_trailing_stop_moves_to_cost_and_never_moves_down() -> None:
-    engine = _default_state_for(UNDERLYINGS["NIFTY"])
+    engine = _default_state_for(UNDERLYINGS["NATURALGAS"])
     trade = {"entry_option": 100.0, "stop_price": 80.0, "max_ltp": 100.0}
 
-    assert _update_trailing_stop(trade, engine, 130.0) == "SL_TO_COST"
+    assert _update_trailing_stop(trade, engine, 125.0) == "SL_TO_COST"
     assert trade["stop_price"] == 100.0
     assert _update_trailing_stop(trade, engine, 120.0) is None
     assert trade["stop_price"] == 100.0
+
+
+def test_trailing_stop_starts_at_30_percent_even_with_stale_engine_setting() -> None:
+    engine = _default_state_for(UNDERLYINGS["NIFTY"])
+    engine["trail_after_profit_pct"] = 0.75
+    trade = {"entry_option": 100.0, "stop_price": 80.0, "max_ltp": 100.0}
+
+    assert _update_trailing_stop(trade, engine, 130.0) in {"MFE_TRAIL", "STEP_TRAIL"}
+    assert trade["trailing_active"] is True
+    raised_stop = trade["stop_price"]
+    assert _update_trailing_stop(trade, engine, 120.0) is None
+    assert trade["stop_price"] == raised_stop
 
 
 def test_trailing_stop_raises_with_mfe_and_point_steps() -> None:
