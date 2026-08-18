@@ -26,6 +26,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _contract_lot_size,
     _load_login_credentials,
     _load_risk_settings,
+    _migrate_natural_gas_risk_defaults,
     _mcx_order_quantity,
     _mcx_position_size_details,
     _trade_pnl_quantity,
@@ -121,6 +122,43 @@ def test_mcx_schedule_runs_entries_to_2230_and_exits_at_2250() -> None:
     for name in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"):
         assert UNDERLYINGS[name].entry_cutoff_ist == "22:30"
         assert UNDERLYINGS[name].mandatory_exit_ist == "22:50"
+
+
+def test_natural_gas_uses_dedicated_risk_defaults() -> None:
+    state = _default_state_for(UNDERLYINGS["NATURALGAS"])
+
+    assert state["sl_points"] == 2.0
+    assert state["sl_to_cost_profit_pct"] == 0.25
+    assert state["trail_after_profit_pct"] == 0.35
+    assert state["mfe_giveback_pct"] == 0.275
+    assert state["trail_trigger_points"] == 3.0
+    assert state["trail_step_points"] == 1.0
+
+
+def test_natural_gas_legacy_defaults_are_migrated_without_overwriting_custom_values() -> None:
+    legacy_state = {
+        "NATURALGAS": {
+            "sl_points": 20.0,
+            "sl_to_cost_profit_pct": 0.30,
+            "trail_after_profit_pct": 0.50,
+            "mfe_giveback_pct": 0.275,
+            "trail_trigger_points": 15.0,
+            "trail_step_points": 5.0,
+        }
+    }
+    assert _migrate_natural_gas_risk_defaults(legacy_state) is True
+    assert legacy_state["NATURALGAS"] == {
+        "sl_points": 2.0,
+        "sl_to_cost_profit_pct": 0.25,
+        "trail_after_profit_pct": 0.35,
+        "mfe_giveback_pct": 0.275,
+        "trail_trigger_points": 3.0,
+        "trail_step_points": 1.0,
+    }
+
+    custom_state = {"NATURALGAS": {**legacy_state["NATURALGAS"], "mfe_giveback_pct": 0.20}}
+    assert _migrate_natural_gas_risk_defaults(custom_state) is False
+    assert custom_state["NATURALGAS"]["mfe_giveback_pct"] == 0.20
 
 
 def test_mcx_position_size_separates_lots_broker_quantity_and_contract_size() -> None:

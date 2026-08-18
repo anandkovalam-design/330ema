@@ -164,6 +164,24 @@ RISK_SETTING_KEYS = (
     "trail_step_points",
 )
 
+NATURAL_GAS_RISK_DEFAULTS = {
+    "sl_points": 2.0,
+    "sl_to_cost_profit_pct": 0.25,
+    "trail_after_profit_pct": 0.35,
+    "mfe_giveback_pct": 0.275,
+    "trail_trigger_points": 3.0,
+    "trail_step_points": 1.0,
+}
+
+LEGACY_NATURAL_GAS_RISK_DEFAULTS = {
+    "sl_points": 20.0,
+    "sl_to_cost_profit_pct": 0.30,
+    "trail_after_profit_pct": 0.50,
+    "mfe_giveback_pct": 0.275,
+    "trail_trigger_points": 15.0,
+    "trail_step_points": 5.0,
+}
+
 
 def _to_float(value: object, default: float = 0.0) -> float:
     try:
@@ -320,6 +338,19 @@ def _sync_scaled_metal_risk_settings(engine_state: dict[str, dict[str, Any]]) ->
             state.update(expected)
             changed = True
     return changed
+
+
+def _migrate_natural_gas_risk_defaults(engine_state: dict[str, dict[str, Any]]) -> bool:
+    state = engine_state.get("NATURALGAS")
+    if not isinstance(state, dict):
+        return False
+    if any(
+        abs(_to_float(state.get(key), value) - value) >= 1e-9
+        for key, value in LEGACY_NATURAL_GAS_RISK_DEFAULTS.items()
+    ):
+        return False
+    state.update(NATURAL_GAS_RISK_DEFAULTS)
+    return True
 
 
 def _save_connection_for_today(api_key: str, access_token: str) -> None:
@@ -919,6 +950,16 @@ def _place_market_order(kite: KiteConnect, instrument: str, side: str, quantity:
 
 
 def _default_state_for(cfg: UnderlyingConfig) -> dict[str, Any]:
+    risk_defaults = {
+        "sl_points": cfg.default_sl_points,
+        "sl_to_cost_profit_pct": 0.30,
+        "trail_after_profit_pct": 0.50,
+        "mfe_giveback_pct": 0.275,
+        "trail_trigger_points": 15.0 * cfg.risk_point_multiplier,
+        "trail_step_points": 5.0 * cfg.risk_point_multiplier,
+    }
+    if cfg.name == "NATURALGAS":
+        risk_defaults.update(NATURAL_GAS_RISK_DEFAULTS)
     return {
         "enabled": True,
         "strategy_mode": STRATEGY_EMA,
@@ -930,12 +971,7 @@ def _default_state_for(cfg: UnderlyingConfig) -> dict[str, Any]:
         "order_logs": [],
         "quantity": cfg.default_qty,
         "lots": cfg.default_lots,
-        "sl_points": cfg.default_sl_points,
-        "sl_to_cost_profit_pct": 0.30,
-        "trail_after_profit_pct": 0.50,
-        "mfe_giveback_pct": 0.275,
-        "trail_trigger_points": 15.0 * cfg.risk_point_multiplier,
-        "trail_step_points": 5.0 * cfg.risk_point_multiplier,
+        **risk_defaults,
         "max_trades": 3,
         "trades_taken": 0,
         "entry_status": "Waiting for market data",
@@ -1895,6 +1931,8 @@ def _init_session_state() -> None:
             state = st.session_state.engine_state.setdefault(name, {})
             for key, value in _default_state_for(cfg).items():
                 state.setdefault(key, value)
+    if _migrate_natural_gas_risk_defaults(st.session_state.engine_state):
+        _save_risk_settings(st.session_state.engine_state)
     if _sync_scaled_metal_risk_settings(st.session_state.engine_state):
         _save_risk_settings(st.session_state.engine_state)
     for name in UNDERLYINGS:
