@@ -825,6 +825,16 @@ def _mcx_order_quantity(
     return lots, broker_lot_size, lots * broker_lot_size
 
 
+def _trade_pnl_quantity(cfg: UnderlyingConfig, open_trade: dict[str, Any]) -> int:
+    """Return the price-unit multiplier used for option premium P&L."""
+
+    broker_quantity = max(1, int(open_trade.get("quantity", 1)))
+    if cfg.option_exchange != "MCX":
+        return broker_quantity
+    contract_multiplier, _ = MCX_CONTRACT_SPECS[cfg.name]
+    return broker_quantity * contract_multiplier
+
+
 def _extract_ltp(kite: KiteConnect, instrument: str) -> float:
     payload = kite.ltp(instrument)
     info = payload.get(instrument)
@@ -1239,6 +1249,7 @@ def _run_engine_for(
     if isinstance(open_trade, dict) and open_trade:
         ltp = _extract_ltp(kite, str(open_trade["instrument"]))
         qty = int(open_trade["quantity"])
+        pnl_qty = _trade_pnl_quantity(cfg, open_trade)
         entry = _to_float(open_trade["entry_option"], 0.0)
         is_heikin_ashi_trade = str(open_trade.get("strategy_mode", STRATEGY_EMA)) == STRATEGY_HEIKIN_ASHI
         trail_stage = None
@@ -1259,7 +1270,7 @@ def _run_engine_for(
         if trail_stage:
             _push_event(engine, f"{cfg.name} {trail_stage} raised SL to {stop:.2f} at LTP {ltp:.2f}")
 
-        unrealized = (ltp - entry) * qty
+        unrealized = (ltp - entry) * pnl_qty
         open_trade["ltp"] = ltp
         open_trade["unrealized"] = unrealized
         open_trade["sl_distance"] = ltp - stop
@@ -1305,7 +1316,7 @@ def _run_engine_for(
         if hard_stop_requested:
             if not _try_exit_live_if_needed("HARD_STOP"):
                 return engine
-            pnl = (ltp - entry) * qty
+            pnl = (ltp - entry) * pnl_qty
             _complete_persistent_trade(
                 cfg, open_trade, exit_price=ltp, realized_pnl=pnl,
                 exit_reason="HARD_STOP", exit_time=now_ist,
@@ -1320,7 +1331,7 @@ def _run_engine_for(
         elif ltp <= stop:
             if not _try_exit_live_if_needed("STOP_LOSS"):
                 return engine
-            pnl = (stop - entry) * qty
+            pnl = (stop - entry) * pnl_qty
             _complete_persistent_trade(
                 cfg, open_trade, exit_price=stop, realized_pnl=pnl,
                 exit_reason="STOP_LOSS", exit_time=now_ist,
@@ -1332,7 +1343,7 @@ def _run_engine_for(
         elif now_ist.time() >= force_exit:
             if not _try_exit_live_if_needed("EOD_CLOSE"):
                 return engine
-            pnl = (ltp - entry) * qty
+            pnl = (ltp - entry) * pnl_qty
             _complete_persistent_trade(
                 cfg, open_trade, exit_price=ltp, realized_pnl=pnl,
                 exit_reason="EOD_CLOSE", exit_time=now_ist,
@@ -1348,7 +1359,7 @@ def _run_engine_for(
         ):
             if not _try_exit_live_if_needed("HA_COLOR_REVERSAL"):
                 return engine
-            pnl = (ltp - entry) * qty
+            pnl = (ltp - entry) * pnl_qty
             _complete_persistent_trade(
                 cfg, open_trade, exit_price=ltp, realized_pnl=pnl,
                 exit_reason="HA_COLOR_REVERSAL", exit_time=now_ist,

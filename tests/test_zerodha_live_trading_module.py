@@ -24,6 +24,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _load_login_credentials,
     _load_risk_settings,
     _mcx_order_quantity,
+    _trade_pnl_quantity,
     MCX_CONTRACT_SPECS,
     _run_parallel_index_engines,
     _sync_scaled_metal_risk_settings,
@@ -148,6 +149,17 @@ def test_mcx_display_contract_sizes_are_separate_from_broker_quantity() -> None:
     assert MCX_CONTRACT_SPECS["NATURALGAS"] == (1250, "MMBtu")
     assert MCX_CONTRACT_SPECS["GOLD"] == (100, "x 10 g = 1 kg")
     assert MCX_CONTRACT_SPECS["SILVER"] == (30, "kg")
+
+
+def test_mcx_pnl_uses_physical_multiplier_without_changing_broker_quantity() -> None:
+    trade = {"quantity": 1}
+    assert _trade_pnl_quantity(UNDERLYINGS["CRUDEOIL"], trade) == 100
+    assert _trade_pnl_quantity(UNDERLYINGS["NATURALGAS"], trade) == 1250
+    assert _trade_pnl_quantity(UNDERLYINGS["GOLD"], trade) == 100
+    assert _trade_pnl_quantity(UNDERLYINGS["SILVER"], trade) == 30
+    assert trade["quantity"] == 1
+
+    assert _trade_pnl_quantity(UNDERLYINGS["NIFTY"], {"quantity": 130}) == 130
 
 
 def test_standalone_dashboard_entry_point() -> None:
