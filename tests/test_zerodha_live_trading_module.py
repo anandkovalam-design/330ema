@@ -332,6 +332,12 @@ def test_heikin_ashi_trade_exits_on_first_closed_opposite_candle(monkeypatch) ->
 
 def test_index_runs_ema_and_heikin_ashi_in_parallel_with_independent_modes(monkeypatch) -> None:
     calls: list[tuple[str, str, bool]] = []
+    fetch_calls = 0
+
+    def fake_fetch(*args, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        return pd.DataFrame()
 
     def fake_run_engine_for(*, engine, trade_mode, real_mode_armed, **kwargs):
         strategy = str(engine["strategy_mode"])
@@ -349,6 +355,7 @@ def test_index_runs_ema_and_heikin_ashi_in_parallel_with_independent_modes(monke
         return engine
 
     monkeypatch.setattr(app, "_run_engine_for", fake_run_engine_for)
+    monkeypatch.setattr(app, "_fetch_spot_5m", fake_fetch)
     engine = _default_state_for(UNDERLYINGS["NIFTY"])
 
     result = _run_parallel_index_engines(
@@ -360,6 +367,7 @@ def test_index_runs_ema_and_heikin_ashi_in_parallel_with_independent_modes(monke
         (app.STRATEGY_EMA, "REAL", True),
         (STRATEGY_HEIKIN_ASHI, "PAPER", False),
     ]
+    assert fetch_calls == 1
     assert result["open_trade"]["instrument"] == "NFO:NIFTYEMACE"
     assert result["ha_open_trade"]["instrument"] == "NFO:NIFTYHACE"
     assert result["realized_pnl"] == 50.0
@@ -376,6 +384,7 @@ def test_parallel_upgrade_preserves_an_existing_heikin_ashi_position(monkeypatch
         return engine
 
     monkeypatch.setattr(app, "_run_engine_for", fake_run_engine_for)
+    monkeypatch.setattr(app, "_fetch_spot_5m", lambda *args, **kwargs: pd.DataFrame())
     engine = _default_state_for(UNDERLYINGS["NIFTY"])
     engine["strategy_mode"] = STRATEGY_HEIKIN_ASHI
     engine["last_signal_ts"] = "2026-08-19T09:50:00+05:30"

@@ -575,7 +575,13 @@ def _fetch_spot_5m(
     frame = frame.rename(columns={"date": "timestamp"})
     frame["signal_symbol"] = signal_symbol
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
-    frame = frame.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    for column in ("open", "high", "low", "close"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = (
+        frame.dropna(subset=["timestamp", "open", "high", "low", "close"])
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
     return frame
 
 
@@ -1169,10 +1175,15 @@ def _run_engine_for(
     trade_mode: str,
     real_mode_armed: bool,
     instrument_rows: list[dict[str, Any]] | None = None,
+    market_bars: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     now_ist = datetime.now(IST)
 
-    bars = _fetch_spot_5m(kite, cfg, instrument_rows, expiry_offset=expiry_week_offset)
+    bars = (
+        market_bars.copy()
+        if isinstance(market_bars, pd.DataFrame)
+        else _fetch_spot_5m(kite, cfg, instrument_rows, expiry_offset=expiry_week_offset)
+    )
     if bars.empty:
         engine["entry_status"] = "No market data returned"
         return engine
@@ -1508,6 +1519,12 @@ def _run_parallel_index_engines(
 ) -> dict[str, Any]:
     """Run EMA in the selected mode and HA independently in PAPER mode."""
 
+    shared_market_bars = _fetch_spot_5m(
+        kite,
+        cfg,
+        expiry_offset=expiry_week_offset,
+    )
+
     if str(engine.get("strategy_mode")) == STRATEGY_HEIKIN_ASHI:
         if not engine.get("ha_last_signal_ts"):
             engine["ha_last_signal_ts"] = engine.get("last_signal_ts")
@@ -1529,6 +1546,7 @@ def _run_parallel_index_engines(
         expiry_week_offset=expiry_week_offset,
         trade_mode=trade_mode,
         real_mode_armed=real_mode_armed,
+        market_bars=shared_market_bars,
     )
     ha_state = _parallel_heikin_ashi_state(
         engine,
@@ -1545,6 +1563,7 @@ def _run_parallel_index_engines(
         expiry_week_offset=expiry_week_offset,
         trade_mode="PAPER",
         real_mode_armed=False,
+        market_bars=shared_market_bars,
     )
     _merge_parallel_heikin_ashi_state(engine, ha_state)
     return engine
@@ -1668,7 +1687,7 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
                     st.metric("HA close", f"{_to_float(latest_ha.get('ha_close')):.2f}")
 
 
-@st.fragment(run_every=3, parallel=True)
+@st.fragment(run_every=5)
 def _render_live_engine(
     trade_mode: str,
     real_mode_armed: bool,
