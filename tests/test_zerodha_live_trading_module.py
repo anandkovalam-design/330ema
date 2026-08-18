@@ -1,18 +1,25 @@
 import pandas as pd
-from datetime import time as wall_time, timedelta
+from datetime import datetime, time as wall_time, timedelta
 
 from aadithya_quantlab.zerodha_live_trading import main
 from aadithya_quantlab.zerodha_live_trading import app
 from aadithya_quantlab.zerodha_live_trading.app import (
     ENTRY_CUTOFF_IST,
+    HEIKIN_ASHI_STOP_POINTS,
     MANDATORY_EXIT_IST,
+    STRATEGY_HEIKIN_ASHI,
+    _build_heikin_ashi_chart,
     _build_price_chart,
+    _completed_5m_bars,
+    _compute_heikin_ashi,
     _compute_signals,
     _credential_preview,
     _clear_login_credentials,
     _default_state_for,
     _entries_blocked_for_expiry_day,
     _front_future_row,
+    _has_opposite_heikin_ashi_candle,
+    _latest_confirmed_heikin_ashi_signal,
     _contract_lot_size,
     _load_login_credentials,
     _load_risk_settings,
@@ -127,6 +134,199 @@ def test_price_chart_contains_candles_and_ema_layers() -> None:
     assert spec["layer"][1]["mark"]["type"] == "bar"
     assert spec["layer"][2]["mark"]["type"] == "line"
     assert spec["layer"][3]["mark"]["type"] == "line"
+
+
+def test_heikin_ashi_formula_colour_and_chart() -> None:
+    timestamps = pd.date_range("2026-08-19 09:15", periods=3, freq="5min", tz="Asia/Kolkata")
+    raw = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [100.0, 95.0, 105.0],
+            "high": [102.0, 108.0, 116.0],
+            "low": [88.0, 94.0, 103.0],
+            "close": [90.0, 106.0, 114.0],
+        }
+    )
+
+    bars = _compute_heikin_ashi(raw)
+
+    assert bars["ha_close"].tolist() == [95.0, 100.75, 109.5]
+    assert bars["ha_open"].tolist() == [95.0, 95.0, 97.875]
+    assert bars["ha_color"].tolist() == ["NEUTRAL", "GREEN", "GREEN"]
+    spec = _build_heikin_ashi_chart(bars, "NIFTY").to_dict()
+    assert len(spec["layer"]) == 2
+    assert spec["layer"][0]["mark"]["type"] == "rule"
+    assert spec["layer"][1]["mark"]["type"] == "bar"
+
+
+def test_heikin_ashi_signal_requires_second_new_colour_candle() -> None:
+    timestamps = pd.date_range("2026-08-19 09:15", periods=5, freq="5min", tz="Asia/Kolkata")
+    bars = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "close": [100.0, 99.0, 101.0, 102.0, 103.0],
+            "ha_color": ["RED", "RED", "GREEN", "GREEN", "GREEN"],
+        }
+    )
+
+    assert _latest_confirmed_heikin_ashi_signal(bars.iloc[:3]) is None
+    signal = _latest_confirmed_heikin_ashi_signal(bars)
+    assert signal is not None
+    assert signal["timestamp"] == timestamps[3]
+    assert signal["ha_color"] == "GREEN"
+
+
+def test_heikin_ashi_uses_closed_bars_and_exits_on_first_opposite_colour() -> None:
+    timestamps = pd.date_range("2026-08-19 09:40", periods=4, freq="5min", tz="Asia/Kolkata")
+    bars = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "ha_color": ["RED", "GREEN", "GREEN", "RED"],
+        }
+    )
+    at_0959 = datetime.fromisoformat("2026-08-19T09:59:00+05:30")
+    at_1000 = datetime.fromisoformat("2026-08-19T10:00:00+05:30")
+
+    assert len(_completed_5m_bars(bars, at_0959)) == 3
+    completed = _completed_5m_bars(bars, at_1000)
+    assert len(completed) == 4
+    assert _has_opposite_heikin_ashi_candle(completed, "GREEN", timestamps[2]) is True
+
+
+def test_heikin_ashi_engine_opens_unlimited_paper_trade_with_fixed_stop(monkeypatch) -> None:
+    now = datetime.fromisoformat("2026-08-19T10:00:00+05:30")
+    timestamps = pd.date_range("2026-08-19 09:40", periods=3, freq="5min", tz="Asia/Kolkata")
+    bars = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [24000.0, 24010.0, 24020.0],
+            "high": [24010.0, 24020.0, 24030.0],
+            "low": [23990.0, 24000.0, 24010.0],
+            "close": [24000.0, 24010.0, 24020.0],
+        }
+    )
+    ha_bars = bars.assign(
+        ha_open=[24005.0, 24000.0, 24005.0],
+        ha_high=[24010.0, 24020.0, 24030.0],
+        ha_low=[23990.0, 24000.0, 24005.0],
+        ha_close=[23995.0, 24010.0, 24020.0],
+        ha_color=["RED", "GREEN", "GREEN"],
+    )
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(app, "datetime", FixedDatetime)
+    monkeypatch.setattr(app, "_fetch_spot_5m", lambda *args, **kwargs: bars)
+    monkeypatch.setattr(app, "_compute_heikin_ashi", lambda frame: ha_bars)
+    monkeypatch.setattr(app, "_select_option_contract", lambda *args, **kwargs: "NFO:NIFTYATMCE")
+    monkeypatch.setattr(app, "_extract_ltp", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(app, "_persist_open_trade", lambda *args, **kwargs: None)
+    engine = _default_state_for(UNDERLYINGS["NIFTY"])
+    engine.update({"strategy_mode": STRATEGY_HEIKIN_ASHI, "trades_taken": 99, "max_trades": 1})
+
+    result = _run_engine_for(
+        object(), UNDERLYINGS["NIFTY"], engine,
+        wall_time(9, 16), wall_time(15, 0), wall_time(15, 15), 1, "PAPER", False,
+    )
+
+    trade = result["open_trade"]
+    assert trade is not None
+    assert trade["instrument"] == "NFO:NIFTYATMCE"
+    assert trade["side"] == "CALL"
+    assert trade["stop_price"] == 100.0 - HEIKIN_ASHI_STOP_POINTS
+    assert trade["trade_mode"] == "PAPER"
+    assert trade["strategy_mode"] == STRATEGY_HEIKIN_ASHI
+
+
+def test_heikin_ashi_strategy_refuses_real_entries(monkeypatch) -> None:
+    now = datetime.fromisoformat("2026-08-19T10:00:00+05:30")
+    timestamps = pd.date_range("2026-08-19 09:40", periods=3, freq="5min", tz="Asia/Kolkata")
+    bars = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [100.0, 101.0, 102.0],
+            "high": [101.0, 102.0, 103.0],
+            "low": [99.0, 100.0, 101.0],
+            "close": [100.0, 101.0, 102.0],
+        }
+    )
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(app, "datetime", FixedDatetime)
+    monkeypatch.setattr(app, "_fetch_spot_5m", lambda *args, **kwargs: bars)
+    engine = _default_state_for(UNDERLYINGS["NIFTY"])
+    engine["strategy_mode"] = STRATEGY_HEIKIN_ASHI
+
+    result = _run_engine_for(
+        object(), UNDERLYINGS["NIFTY"], engine,
+        wall_time(9, 16), wall_time(15, 0), wall_time(15, 15), 1, "REAL", True,
+    )
+
+    assert result["open_trade"] is None
+    assert result["entry_status"] == "Heikin-Ashi test strategy is PAPER-only"
+
+
+def test_heikin_ashi_trade_exits_on_first_closed_opposite_candle(monkeypatch) -> None:
+    now = datetime.fromisoformat("2026-08-19T10:05:00+05:30")
+    timestamps = pd.date_range("2026-08-19 09:40", periods=4, freq="5min", tz="Asia/Kolkata")
+    bars = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [24000.0, 24010.0, 24020.0, 24015.0],
+            "high": [24010.0, 24020.0, 24030.0, 24020.0],
+            "low": [23990.0, 24000.0, 24010.0, 24000.0],
+            "close": [24000.0, 24010.0, 24020.0, 24005.0],
+        }
+    )
+    ha_bars = bars.assign(
+        ha_open=[24005.0, 24000.0, 24005.0, 24015.0],
+        ha_high=[24010.0, 24020.0, 24030.0, 24020.0],
+        ha_low=[23990.0, 24000.0, 24005.0, 24000.0],
+        ha_close=[23995.0, 24010.0, 24020.0, 24005.0],
+        ha_color=["RED", "GREEN", "GREEN", "RED"],
+    )
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(app, "datetime", FixedDatetime)
+    monkeypatch.setattr(app, "_fetch_spot_5m", lambda *args, **kwargs: bars)
+    monkeypatch.setattr(app, "_compute_heikin_ashi", lambda frame: ha_bars)
+    monkeypatch.setattr(app, "_extract_ltp", lambda *args, **kwargs: 112.0)
+    monkeypatch.setattr(app, "_complete_persistent_trade", lambda *args, **kwargs: None)
+    engine = _default_state_for(UNDERLYINGS["NIFTY"])
+    engine["strategy_mode"] = STRATEGY_HEIKIN_ASHI
+    engine["last_signal_ts"] = timestamps[2].isoformat()
+    engine["open_trade"] = {
+        "instrument": "NFO:NIFTYATMCE",
+        "entry_option": 100.0,
+        "quantity": 130,
+        "stop_price": 80.0,
+        "max_ltp": 100.0,
+        "signal_time": timestamps[2].isoformat(),
+        "entry_ha_color": "GREEN",
+        "strategy_mode": STRATEGY_HEIKIN_ASHI,
+        "trade_mode": "PAPER",
+    }
+
+    result = _run_engine_for(
+        object(), UNDERLYINGS["NIFTY"], engine,
+        wall_time(9, 16), wall_time(15, 0), wall_time(15, 15), 1, "PAPER", False,
+    )
+
+    assert result["open_trade"] is None
+    assert result["trades_taken"] == 1
+    assert result["realized_pnl"] == 1560.0
+    assert any("EXIT HA_COLOR_REVERSAL" in event for event in result["events"])
 
 
 def test_trailing_stop_moves_to_cost_and_never_moves_down() -> None:

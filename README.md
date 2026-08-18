@@ -42,6 +42,14 @@ starts in PAPER mode; REAL orders require selecting REAL and separately arming
 the live-order confirmation. New EMA crossover entries are accepted through
 15:00 IST (inclusive), and every remaining open trade is exited at 15:15 IST.
 
+NIFTY and SENSEX can instead use the selectable 5-minute Heikin-Ashi reversal
+test strategy. After a colour change, the second consecutive candle of the new
+colour confirms entry: green buys the nearest ATM CE and red buys the nearest
+ATM PE. It uses a fixed 20-point option-premium stop, marks the +10-point profit
+gate, and holds until the first closed opposite-colour candle (or the 15:15 IST
+mandatory exit). This strategy has no daily trade-count limit and is deliberately
+PAPER-only; selecting global REAL mode pauses its new entries.
+
 The same EMA 3/30 workflow also supports MCX CRUDEOIL, NATURALGAS, GOLD, and
 SILVER options. The dashboard independently selects Current month or Next month
 for MCX; each commodity chart and its CALL/PUT ATM option use the same selected

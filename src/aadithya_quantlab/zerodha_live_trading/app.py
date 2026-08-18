@@ -45,6 +45,10 @@ API_SECRET_ACCOUNT = "api-secret"
 ENTRY_START_IST = "09:16"
 ENTRY_CUTOFF_IST = "15:00"
 MANDATORY_EXIT_IST = "15:15"
+STRATEGY_EMA = "EMA_3_30"
+STRATEGY_HEIKIN_ASHI = "HEIKIN_ASHI_REVERSAL"
+HEIKIN_ASHI_PROFIT_GATE_POINTS = 10.0
+HEIKIN_ASHI_STOP_POINTS = 20.0
 
 
 @st.cache_resource
@@ -586,6 +590,68 @@ def _compute_signals(frame: pd.DataFrame) -> pd.DataFrame:
     return bars
 
 
+def _compute_heikin_ashi(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add standard Heikin-Ashi OHLC and colour columns to chronological bars."""
+
+    bars = frame.copy().sort_values("timestamp").reset_index(drop=True)
+    if bars.empty:
+        for column in ("ha_open", "ha_high", "ha_low", "ha_close", "ha_color"):
+            bars[column] = pd.Series(dtype="object" if column == "ha_color" else "float64")
+        return bars
+
+    bars["ha_close"] = bars[["open", "high", "low", "close"]].mean(axis=1)
+    ha_open: list[float] = [(_to_float(bars.iloc[0]["open"]) + _to_float(bars.iloc[0]["close"])) / 2.0]
+    for index in range(1, len(bars)):
+        ha_open.append((ha_open[-1] + _to_float(bars.iloc[index - 1]["ha_close"])) / 2.0)
+    bars["ha_open"] = ha_open
+    bars["ha_high"] = bars[["high", "ha_open", "ha_close"]].max(axis=1)
+    bars["ha_low"] = bars[["low", "ha_open", "ha_close"]].min(axis=1)
+    bars["ha_color"] = "NEUTRAL"
+    bars.loc[bars["ha_close"] > bars["ha_open"], "ha_color"] = "GREEN"
+    bars.loc[bars["ha_close"] < bars["ha_open"], "ha_color"] = "RED"
+    return bars
+
+
+def _completed_5m_bars(frame: pd.DataFrame, now_ist: datetime) -> pd.DataFrame:
+    """Exclude the currently forming five-minute candle."""
+
+    if frame.empty:
+        return frame.copy()
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    cutoff = pd.Timestamp(now_ist)
+    if timestamps.dt.tz is None:
+        cutoff = cutoff.tz_localize(None)
+    else:
+        cutoff = cutoff.tz_convert(timestamps.dt.tz)
+    candle_close_times = timestamps + pd.Timedelta(5, unit="min")
+    return frame.loc[timestamps.notna() & (candle_close_times <= cutoff)].copy()
+
+
+def _latest_confirmed_heikin_ashi_signal(bars: pd.DataFrame) -> pd.Series | None:
+    """Return the second new-colour candle only for an immediate 2-candle reversal."""
+
+    if len(bars) < 3 or "ha_color" not in bars.columns:
+        return None
+    for end in range(len(bars), 2, -1):
+        candidate = bars.iloc[end - 3 : end]
+        colours = candidate["ha_color"].astype(str).tolist()
+        if colours == ["RED", "GREEN", "GREEN"] or colours == ["GREEN", "RED", "RED"]:
+            return candidate.iloc[-1]
+    return None
+
+
+def _has_opposite_heikin_ashi_candle(
+    bars: pd.DataFrame,
+    entry_color: str,
+    signal_time: pd.Timestamp,
+) -> bool:
+    later = bars.loc[pd.to_datetime(bars["timestamp"], errors="coerce") > signal_time]
+    if later.empty:
+        return False
+    opposite = "RED" if entry_color == "GREEN" else "GREEN"
+    return str(later.iloc[-1].get("ha_color", "NEUTRAL")) == opposite
+
+
 def _build_price_chart(bars: pd.DataFrame, name: str) -> alt.LayerChart:
     chart_data = bars[["timestamp", "open", "high", "low", "close", "ema_fast", "ema_slow"]].copy()
     base = alt.Chart(chart_data).encode(
@@ -622,6 +688,37 @@ def _build_price_chart(bars: pd.DataFrame, name: str) -> alt.LayerChart:
         y=alt.Y("ema_slow:Q", scale=alt.Scale(zero=False))
     )
     return alt.layer(wicks, bodies, ema_fast, ema_slow).properties(height=360).interactive()
+
+
+def _build_heikin_ashi_chart(bars: pd.DataFrame, name: str) -> alt.LayerChart:
+    chart_data = bars[["timestamp", "ha_open", "ha_high", "ha_low", "ha_close", "ha_color"]].copy()
+    base = alt.Chart(chart_data).encode(
+        x=alt.X("timestamp:T", title="Time (IST)", axis=alt.Axis(format="%H:%M", labelAngle=-45)),
+        tooltip=[
+            alt.Tooltip("timestamp:T", title="Time", format="%d %b %H:%M"),
+            alt.Tooltip("ha_open:Q", title="HA Open", format=",.2f"),
+            alt.Tooltip("ha_high:Q", title="HA High", format=",.2f"),
+            alt.Tooltip("ha_low:Q", title="HA Low", format=",.2f"),
+            alt.Tooltip("ha_close:Q", title="HA Close", format=",.2f"),
+            alt.Tooltip("ha_color:N", title="Colour"),
+        ],
+    )
+    candle_color = alt.condition(
+        "datum.ha_color === 'GREEN'",
+        alt.value("#3fff86"),
+        alt.value("#ff5f6d"),
+    )
+    wicks = base.mark_rule(strokeWidth=1).encode(
+        y=alt.Y("ha_low:Q", title=f"{name} Heikin-Ashi price", scale=alt.Scale(zero=False)),
+        y2="ha_high:Q",
+        color=candle_color,
+    )
+    bodies = base.mark_bar(size=5).encode(
+        y=alt.Y("ha_open:Q", scale=alt.Scale(zero=False)),
+        y2="ha_close:Q",
+        color=candle_color,
+    )
+    return alt.layer(wicks, bodies).properties(height=360).interactive()
 
 
 def _next_expiry_weekday(day: datetime.date, expiry_weekday: int) -> datetime.date:
@@ -762,6 +859,7 @@ def _place_market_order(kite: KiteConnect, instrument: str, side: str, quantity:
 def _default_state_for(cfg: UnderlyingConfig) -> dict[str, Any]:
     return {
         "enabled": True,
+        "strategy_mode": STRATEGY_EMA,
         "hard_stop_requested": False,
         "last_signal_ts": None,
         "open_trade": None,
@@ -1025,11 +1123,24 @@ def _run_engine_for(
 
     bars = _compute_signals(bars)
     session_bars = bars.loc[bars["timestamp"].dt.date == now_ist.date()].copy()
+    heikin_ashi_bars = _compute_heikin_ashi(bars)
+    session_heikin_ashi = heikin_ashi_bars.loc[
+        heikin_ashi_bars["timestamp"].dt.date == now_ist.date()
+    ].copy()
+    completed_heikin_ashi = _completed_5m_bars(session_heikin_ashi, now_ist)
     display_bars = session_bars if not session_bars.empty else bars.loc[bars["timestamp"].dt.date == bars["timestamp"].dt.date.max()]
+    display_heikin_ashi = (
+        session_heikin_ashi
+        if not session_heikin_ashi.empty
+        else heikin_ashi_bars.loc[
+            heikin_ashi_bars["timestamp"].dt.date == heikin_ashi_bars["timestamp"].dt.date.max()
+        ]
+    )
     latest = display_bars.iloc[-1]
     latest_time = pd.Timestamp(latest["timestamp"])
     latest_close = _to_float(latest["close"], 0.0)
     engine["latest_bars"] = display_bars.tail(80).copy()
+    engine["latest_ha_bars"] = display_heikin_ashi.tail(80).copy()
     engine["latest_spot"] = latest_close
     engine["latest_time"] = latest_time
     if "signal_symbol" in display_bars.columns:
@@ -1040,7 +1151,21 @@ def _run_engine_for(
         ltp = _extract_ltp(kite, str(open_trade["instrument"]))
         qty = int(open_trade["quantity"])
         entry = _to_float(open_trade["entry_option"], 0.0)
-        trail_stage = _update_trailing_stop(open_trade, engine, ltp)
+        is_heikin_ashi_trade = str(open_trade.get("strategy_mode", STRATEGY_EMA)) == STRATEGY_HEIKIN_ASHI
+        trail_stage = None
+        if is_heikin_ashi_trade:
+            open_trade["max_ltp"] = max(_to_float(open_trade.get("max_ltp"), entry), ltp)
+            if (
+                not bool(open_trade.get("profit_gate_reached", False))
+                and ltp - entry >= HEIKIN_ASHI_PROFIT_GATE_POINTS
+            ):
+                open_trade["profit_gate_reached"] = True
+                _push_event(
+                    engine,
+                    f"{cfg.name} Heikin-Ashi +{HEIKIN_ASHI_PROFIT_GATE_POINTS:g} point gate reached; holding until colour reversal.",
+                )
+        else:
+            trail_stage = _update_trailing_stop(open_trade, engine, ltp)
         stop = _to_float(open_trade["stop_price"], 0.0)
         if trail_stage:
             _push_event(engine, f"{cfg.name} {trail_stage} raised SL to {stop:.2f} at LTP {ltp:.2f}")
@@ -1127,9 +1252,33 @@ def _run_engine_for(
             engine["trades_taken"] = int(engine.get("trades_taken", 0)) + 1
             _push_event(engine, f"{cfg.name} EXIT EOD_CLOSE {open_trade['instrument']} pnl={pnl:.2f}")
             engine["open_trade"] = None
+        elif is_heikin_ashi_trade and _has_opposite_heikin_ashi_candle(
+            completed_heikin_ashi,
+            str(open_trade.get("entry_ha_color", "")),
+            pd.Timestamp(open_trade["signal_time"]),
+        ):
+            if not _try_exit_live_if_needed("HA_COLOR_REVERSAL"):
+                return engine
+            pnl = (ltp - entry) * qty
+            _complete_persistent_trade(
+                cfg, open_trade, exit_price=ltp, realized_pnl=pnl,
+                exit_reason="HA_COLOR_REVERSAL", exit_time=now_ist,
+            )
+            engine["realized_pnl"] = _to_float(engine.get("realized_pnl"), 0.0) + pnl
+            engine["trades_taken"] = int(engine.get("trades_taken", 0)) + 1
+            _push_event(
+                engine,
+                f"{cfg.name} EXIT HA_COLOR_REVERSAL {open_trade['instrument']} pnl={pnl:.2f}",
+            )
+            engine["open_trade"] = None
 
     if engine.get("open_trade") is not None:
-        engine["entry_status"] = "Position open; monitoring stop"
+        open_strategy = str(engine["open_trade"].get("strategy_mode", STRATEGY_EMA))
+        engine["entry_status"] = (
+            "Heikin-Ashi position open; monitoring fixed stop and colour reversal"
+            if open_strategy == STRATEGY_HEIKIN_ASHI
+            else "Position open; monitoring stop"
+        )
         return engine
 
     if bool(engine.get("hard_stop_requested", False)):
@@ -1148,33 +1297,44 @@ def _run_engine_for(
     if now_ist.time() < entry_start or now_ist.time() > entry_end:
         engine["entry_status"] = f"Outside entry window {entry_start.strftime('%H:%M')}-{entry_end.strftime('%H:%M')}"
         return engine
-    if int(engine.get("trades_taken", 0)) >= int(engine.get("max_trades", 1)):
+    strategy_mode = str(engine.get("strategy_mode", STRATEGY_EMA))
+    use_heikin_ashi = cfg.name in INDEX_NAMES and strategy_mode == STRATEGY_HEIKIN_ASHI
+    if use_heikin_ashi and str(trade_mode).upper() != "PAPER":
+        engine["entry_status"] = "Heikin-Ashi test strategy is PAPER-only"
+        return engine
+    if not use_heikin_ashi and int(engine.get("trades_taken", 0)) >= int(engine.get("max_trades", 1)):
         engine["entry_status"] = "Maximum trades reached"
         return engine
     if session_bars.empty:
         engine["entry_status"] = "No bars received for today's session"
         return engine
 
-    signals = session_bars[(session_bars["cross_up"]) | (session_bars["cross_down"])]
-    if signals.empty:
-        engine["entry_status"] = "No EMA 3/30 crossover today"
-        return engine
-
-    sig = signals.iloc[-1]
+    if use_heikin_ashi:
+        sig = _latest_confirmed_heikin_ashi_signal(completed_heikin_ashi)
+        if sig is None:
+            engine["entry_status"] = "Waiting for a confirmed two-candle Heikin-Ashi reversal"
+            return engine
+        side = "CALL" if str(sig["ha_color"]) == "GREEN" else "PUT"
+    else:
+        signals = session_bars[(session_bars["cross_up"]) | (session_bars["cross_down"])]
+        if signals.empty:
+            engine["entry_status"] = "No EMA 3/30 crossover today"
+            return engine
+        sig = signals.iloc[-1]
+        side = "CALL" if bool(sig["cross_up"]) else "PUT"
     signal_time = pd.Timestamp(sig["timestamp"])
     signal_iso = signal_time.isoformat()
     last_signal = engine.get("last_signal_ts")
     if isinstance(last_signal, str) and last_signal and signal_iso <= last_signal:
-        engine["entry_status"] = "Latest crossover already processed"
+        engine["entry_status"] = "Latest strategy signal already processed"
         return engine
 
     sig_local_time = signal_time.tz_convert(IST).time() if signal_time.tzinfo is not None else signal_time.time()
     if sig_local_time < entry_start or sig_local_time > entry_end:
         engine["last_signal_ts"] = signal_iso
-        engine["entry_status"] = "Latest crossover was outside entry window"
+        engine["entry_status"] = "Latest strategy signal was outside entry window"
         return engine
 
-    side = "CALL" if bool(sig["cross_up"]) else "PUT"
     spot_price = _to_float(sig["close"], 0.0)
     instrument = _select_option_contract(
         kite,
@@ -1185,7 +1345,11 @@ def _run_engine_for(
         instrument_rows=instrument_rows,
     )
     entry_option = _extract_ltp(kite, instrument)
-    sl_points = _to_float(engine.get("sl_points"), cfg.default_sl_points)
+    sl_points = (
+        HEIKIN_ASHI_STOP_POINTS
+        if use_heikin_ashi
+        else _to_float(engine.get("sl_points"), cfg.default_sl_points)
+    )
     stop_price = max(entry_option - sl_points, 0.05)
     if cfg.signal_source == "FRONT_FUTURE":
         if not instrument_rows:
@@ -1249,14 +1413,28 @@ def _run_engine_for(
         "unrealized": 0.0,
         "sl_distance": entry_option - stop_price,
         "entry_order_id": entry_order_id,
-        "trade_mode": trade_mode,
+        "trade_mode": "PAPER" if use_heikin_ashi else trade_mode,
+        "strategy_mode": STRATEGY_HEIKIN_ASHI if use_heikin_ashi else STRATEGY_EMA,
     }
+    if use_heikin_ashi:
+        engine["open_trade"].update(
+            {
+                "entry_ha_color": str(sig["ha_color"]),
+                "profit_gate_points": HEIKIN_ASHI_PROFIT_GATE_POINTS,
+                "profit_gate_reached": False,
+            }
+        )
     _persist_open_trade(cfg, engine["open_trade"])
     engine["last_signal_ts"] = signal_iso
-    engine["entry_status"] = f"Position opened from {side} crossover"
+    engine["entry_status"] = (
+        f"PAPER position opened after confirmed {sig['ha_color']} Heikin-Ashi reversal"
+        if use_heikin_ashi
+        else f"Position opened from {side} crossover"
+    )
     _push_event(
         engine,
-        f"{cfg.name} ENTRY {side} {instrument} qty={qty} entry={entry_option:.2f} stop={stop_price:.2f}",
+        f"{cfg.name} {'HA ' if use_heikin_ashi else ''}ENTRY {side} {instrument} "
+        f"qty={qty} entry={entry_option:.2f} stop={stop_price:.2f}",
     )
     return engine
 
@@ -1265,14 +1443,20 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
     st.subheader(name)
     cfg = UNDERLYINGS[name]
     signal_symbol = str(engine.get("signal_symbol", name))
+    use_heikin_ashi = (
+        name in INDEX_NAMES
+        and str(engine.get("strategy_mode", STRATEGY_EMA)) == STRATEGY_HEIKIN_ASHI
+    )
+    strategy_label = "Heikin-Ashi reversal (PAPER)" if use_heikin_ashi else "EMA 3/30"
     st.caption(
-        f"Signal: {signal_symbol} · EMA 3/30 · entries to {cfg.entry_cutoff_ist} IST · "
+        f"Signal: {signal_symbol} · {strategy_label} · entries to {cfg.entry_cutoff_ist} IST · "
         f"exit {cfg.mandatory_exit_ist} IST"
     )
     left, right = st.columns([1.1, 1.9])
     with left:
         st.metric("Realized P&L", f"{_to_float(engine.get('realized_pnl')):.2f}")
-        st.metric("Trades Taken", f"{int(engine.get('trades_taken', 0))}/{int(engine.get('max_trades', 1))}")
+        trade_limit = "unlimited" if use_heikin_ashi else str(int(engine.get("max_trades", 1)))
+        st.metric("Trades Taken", f"{int(engine.get('trades_taken', 0))}/{trade_limit}")
         st.caption(f"Engine status: {engine.get('entry_status', 'Waiting')}")
         open_trade = engine.get("open_trade")
         if isinstance(open_trade, dict) and open_trade:
@@ -1289,7 +1473,14 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
             st.write(f"SL: {stop:.2f}")
             st.write(f"SL Trigger: LTP <= {stop:.2f}")
             st.write(f"Distance to SL: {dist:.2f}")
-            st.write(f"Trailing: {'ACTIVE' if open_trade.get('trailing_active') else 'WAITING'}")
+            if str(open_trade.get("strategy_mode", STRATEGY_EMA)) == STRATEGY_HEIKIN_ASHI:
+                st.write(f"Entry HA colour: {open_trade.get('entry_ha_color', '')}")
+                st.write(
+                    f"+10 point gate: {'REACHED' if open_trade.get('profit_gate_reached') else 'WAITING'}"
+                )
+                st.write("Exit signal: first opposite closed HA candle")
+            else:
+                st.write(f"Trailing: {'ACTIVE' if open_trade.get('trailing_active') else 'WAITING'}")
             st.write(f"Highest LTP: {_to_float(open_trade.get('max_ltp', open_trade.get('entry_option'))):.2f}")
         else:
             st.info("Trade: NO OPEN POSITION")
@@ -1305,29 +1496,42 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
             st.dataframe(pd.DataFrame(order_logs[-8:]), width="stretch", height=220)
 
     with right:
-        bars = engine.get("latest_bars")
+        bars = engine.get("latest_ha_bars") if use_heikin_ashi else engine.get("latest_bars")
         if isinstance(bars, pd.DataFrame) and not bars.empty:
             session_date = pd.Timestamp(bars["timestamp"].iloc[-1]).strftime("%d %b %Y")
-            st.caption(f"{session_date} candlesticks | EMA 3 yellow | EMA 30 blue")
-            st.altair_chart(_build_price_chart(bars, name), width="stretch")
-
             latest = bars.iloc[-1]
-            ema_fast = _to_float(latest.get("ema_fast"), 0.0)
-            ema_slow = _to_float(latest.get("ema_slow"), 0.0)
-            ema_gap = ema_fast - ema_slow
-            trend_label = "BULLISH" if ema_gap > 0 else "BEARISH" if ema_gap < 0 else "NEUTRAL"
-            cross_label = "CROSS UP" if bool(latest.get("cross_up", False)) else "CROSS DOWN" if bool(latest.get("cross_down", False)) else "NO NEW CROSS"
+            if use_heikin_ashi:
+                st.caption(
+                    f"{session_date} · 5-minute Heikin-Ashi candles · entries after two-candle confirmation"
+                )
+                st.altair_chart(_build_heikin_ashi_chart(bars, name), width="stretch")
+                h1, h2, h3 = st.columns(3)
+                with h1:
+                    st.metric("HA colour", str(latest.get("ha_color", "NEUTRAL")))
+                with h2:
+                    st.metric("HA open", f"{_to_float(latest.get('ha_open')):.2f}")
+                with h3:
+                    st.metric("HA close", f"{_to_float(latest.get('ha_close')):.2f}")
+                st.caption("GREEN confirmation buys nearest ATM CE; RED confirmation buys nearest ATM PE.")
+            else:
+                st.caption(f"{session_date} candlesticks | EMA 3 yellow | EMA 30 blue")
+                st.altair_chart(_build_price_chart(bars, name), width="stretch")
+                ema_fast = _to_float(latest.get("ema_fast"), 0.0)
+                ema_slow = _to_float(latest.get("ema_slow"), 0.0)
+                ema_gap = ema_fast - ema_slow
+                trend_label = "BULLISH" if ema_gap > 0 else "BEARISH" if ema_gap < 0 else "NEUTRAL"
+                cross_label = "CROSS UP" if bool(latest.get("cross_up", False)) else "CROSS DOWN" if bool(latest.get("cross_down", False)) else "NO NEW CROSS"
 
-            e1, e2, e3, e4 = st.columns(4)
-            with e1:
-                st.metric("EMA 3", f"{ema_fast:.2f}")
-            with e2:
-                st.metric("EMA 30", f"{ema_slow:.2f}")
-            with e3:
-                st.metric("EMA gap", f"{ema_gap:.2f}")
-            with e4:
-                st.metric("Trend", trend_label)
-            st.caption(f"Latest EMA signal check: {cross_label}")
+                e1, e2, e3, e4 = st.columns(4)
+                with e1:
+                    st.metric("EMA 3", f"{ema_fast:.2f}")
+                with e2:
+                    st.metric("EMA 30", f"{ema_slow:.2f}")
+                with e3:
+                    st.metric("EMA gap", f"{ema_gap:.2f}")
+                with e4:
+                    st.metric("Trend", trend_label)
+                st.caption(f"Latest EMA signal check: {cross_label}")
         else:
             st.caption("No chart data yet.")
 
@@ -2036,6 +2240,38 @@ def main() -> None:
             f"Index option filter: {expiry_mode}. MCX futures chart and ATM option: {commodity_expiry_mode}."
         )
 
+        st.markdown("**Index strategy selection**")
+        strategy_columns = st.columns(2)
+        strategy_labels = {
+            "EMA 3/30": STRATEGY_EMA,
+            "Heikin-Ashi reversal (PAPER test)": STRATEGY_HEIKIN_ASHI,
+        }
+        for column, name in zip(strategy_columns, INDEX_NAMES):
+            state = st.session_state.engine_state[name]
+            current_value = str(state.get("strategy_mode", STRATEGY_EMA))
+            current_label = next(
+                (label for label, value in strategy_labels.items() if value == current_value),
+                "EMA 3/30",
+            )
+            with column:
+                selected_label = st.segmented_control(
+                    f"{name} strategy",
+                    options=list(strategy_labels),
+                    default=current_label,
+                    key=f"strategy_mode_{name}",
+                    disabled=bool(state.get("open_trade")),
+                )
+                state["strategy_mode"] = strategy_labels.get(selected_label, STRATEGY_EMA)
+                if state["strategy_mode"] == STRATEGY_HEIKIN_ASHI:
+                    st.caption(
+                        "5-minute HA · second candle confirms · fixed 20-point SL · "
+                        "hold after +10 until opposite colour · unlimited PAPER trades"
+                    )
+                    if trade_mode == "REAL":
+                        st.warning(f"{name} Heikin-Ashi entries are paused because this test strategy is PAPER-only.")
+                elif state.get("open_trade"):
+                    st.caption("Strategy is locked while a position is open.")
+
         st.markdown("**Position sizing and daily limits**")
         for start in range(0, len(UNDERLYINGS), 3):
             names = list(UNDERLYINGS)[start : start + 3]
@@ -2059,13 +2295,18 @@ def main() -> None:
                         st.caption(f"Current quantity: {lots * int(state['lot_size'])}")
                     else:
                         st.caption("Quantity resolves from the selected MCX contract lot size.")
-                    state["max_trades"] = int(
-                        st.number_input(
-                            f"{name} max trades", min_value=1,
-                            value=int(state.get("max_trades", 3)), step=1,
-                            key=f"max_trades_{name}",
-                        )
+                    unlimited_trades = (
+                        name in INDEX_NAMES
+                        and str(state.get("strategy_mode", STRATEGY_EMA)) == STRATEGY_HEIKIN_ASHI
                     )
+                    max_trades = st.number_input(
+                        f"{name} max trades", min_value=1,
+                        value=int(state.get("max_trades", 3)), step=1,
+                        key=f"max_trades_{name}", disabled=unlimited_trades,
+                    )
+                    state["max_trades"] = int(max_trades)
+                    if unlimited_trades:
+                        st.caption("Daily trade limit: unlimited for this PAPER test strategy.")
 
         _, reset_column, _ = st.columns(3)
         with reset_column:

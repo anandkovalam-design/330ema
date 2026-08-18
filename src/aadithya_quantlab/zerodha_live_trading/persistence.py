@@ -12,6 +12,7 @@ from typing import Any, Mapping
 STATE_SCHEMA_VERSION = 1
 PERSISTED_ENGINE_FIELDS = (
     "enabled",
+    "strategy_mode",
     "hard_stop_requested",
     "last_signal_ts",
     "open_trade",
