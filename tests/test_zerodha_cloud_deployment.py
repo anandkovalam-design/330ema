@@ -29,9 +29,28 @@ def test_cloud_credentials_use_environment_without_keyring(monkeypatch) -> None:
     }
 
 
-def test_cloud_runtime_hard_blocks_real_order_permission(monkeypatch) -> None:
+def test_cloud_runtime_blocks_real_order_permission_by_default(monkeypatch) -> None:
     monkeypatch.setenv("ZERODHA_CLOUD_MODE", "true")
+    monkeypatch.delenv("ZERODHA_ALLOW_REAL_TRADING", raising=False)
     engine = app._default_state_for(app.UNDERLYINGS["NIFTY"])
+
+    assert app._live_orders_permitted(engine, real_mode_armed=True) is False
+
+
+def test_cloud_runtime_allows_explicitly_enabled_armed_real_orders(monkeypatch) -> None:
+    monkeypatch.setenv("ZERODHA_CLOUD_MODE", "true")
+    monkeypatch.setenv("ZERODHA_ALLOW_REAL_TRADING", "true")
+    engine = app._default_state_for(app.UNDERLYINGS["NIFTY"])
+
+    assert app._live_orders_permitted(engine, real_mode_armed=True) is True
+    assert app._live_orders_permitted(engine, real_mode_armed=False) is False
+
+
+def test_cloud_runtime_reconciliation_still_blocks_enabled_real_orders(monkeypatch) -> None:
+    monkeypatch.setenv("ZERODHA_CLOUD_MODE", "true")
+    monkeypatch.setenv("ZERODHA_ALLOW_REAL_TRADING", "true")
+    engine = app._default_state_for(app.UNDERLYINGS["NIFTY"])
+    engine["reconciliation_required"] = True
 
     assert app._live_orders_permitted(engine, real_mode_armed=True) is False
 

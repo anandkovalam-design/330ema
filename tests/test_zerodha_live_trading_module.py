@@ -1,23 +1,56 @@
 import pandas as pd
-from datetime import time as wall_time
+from datetime import time as wall_time, timedelta
 
 from aadithya_quantlab.zerodha_live_trading import main
 from aadithya_quantlab.zerodha_live_trading import app
 from aadithya_quantlab.zerodha_live_trading.app import (
+    ENTRY_CUTOFF_IST,
+    MANDATORY_EXIT_IST,
     _build_price_chart,
     _compute_signals,
     _credential_preview,
     _clear_login_credentials,
     _default_state_for,
     _entries_blocked_for_expiry_day,
+    _front_future_row,
+    _contract_lot_size,
     _load_login_credentials,
     _load_risk_settings,
     _run_engine_for,
+    _select_option_contract,
     _save_login_credentials,
     _save_risk_settings,
     _update_trailing_stop,
     UNDERLYINGS,
 )
+
+
+def test_live_trading_schedule_runs_entries_to_1500_and_exits_at_1515() -> None:
+    assert ENTRY_CUTOFF_IST == "15:00"
+    assert MANDATORY_EXIT_IST == "15:15"
+
+
+def test_mcx_schedule_runs_entries_to_2230_and_exits_at_2250() -> None:
+    for name in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"):
+        assert UNDERLYINGS[name].entry_cutoff_ist == "22:30"
+        assert UNDERLYINGS[name].mandatory_exit_ist == "22:50"
+
+
+def test_mcx_front_future_and_atm_option_are_resolved_dynamically() -> None:
+    future_expiry = (pd.Timestamp.now(tz="Asia/Kolkata") + timedelta(days=10)).date()
+    later_expiry = future_expiry + timedelta(days=30)
+    rows = [
+        {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL26AUGFUT", "instrument_type": "FUT", "expiry": future_expiry, "instrument_token": 101},
+        {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL26SEPFUT", "instrument_type": "FUT", "expiry": later_expiry, "instrument_token": 202},
+        {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL6000CE", "instrument_type": "CE", "expiry": future_expiry, "strike": 6000, "lot_size": 100},
+        {"name": "CRUDEOIL", "tradingsymbol": "CRUDEOIL6100CE", "instrument_type": "CE", "expiry": future_expiry, "strike": 6100, "lot_size": 100},
+    ]
+
+    cfg = UNDERLYINGS["CRUDEOIL"]
+    assert _front_future_row(cfg, rows)["instrument_token"] == 101
+    instrument = _select_option_contract(object(), cfg, "CALL", 6070.0, instrument_rows=rows)
+    assert instrument == "MCX:CRUDEOIL6100CE"
+    assert _contract_lot_size(instrument, rows) == 100
 
 
 def test_standalone_dashboard_entry_point() -> None:
@@ -100,8 +133,9 @@ def test_nifty_hard_stop_closes_paper_position_and_keeps_engine_off(monkeypatch)
             "close": [24010.0, 24020.0],
         }
     )
-    monkeypatch.setattr(app, "_fetch_spot_5m", lambda kite, cfg: bars)
+    monkeypatch.setattr(app, "_fetch_spot_5m", lambda kite, cfg, instrument_rows=None: bars)
     monkeypatch.setattr(app, "_extract_ltp", lambda kite, instrument: 110.0)
+    monkeypatch.setattr(app, "_complete_persistent_trade", lambda *args, **kwargs: None)
     engine = _default_state_for(UNDERLYINGS["NIFTY"])
     engine["enabled"] = False
     engine["hard_stop_requested"] = True

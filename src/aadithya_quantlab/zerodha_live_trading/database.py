@@ -11,7 +11,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from aadithya_quantlab.zerodha_live_trading.persistence import runtime_path
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DATABASE_PATH = runtime_path("quantlab.db")
 
 
@@ -133,6 +133,42 @@ class Database:
                         updated_at TEXT NOT NULL,
                         updated_by INTEGER REFERENCES users(id)
                     );
+                    """
+                )
+                connection.execute("PRAGMA user_version = 1")
+                version = 1
+            if version < 2:
+                connection.executescript(
+                    """
+                    ALTER TABLE trades RENAME TO trades_v1;
+                    CREATE TABLE trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        trade_key TEXT NOT NULL UNIQUE,
+                        trade_date TEXT NOT NULL,
+                        mode TEXT NOT NULL CHECK (mode IN ('PAPER', 'REAL')),
+                        underlying TEXT NOT NULL,
+                        option_symbol TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        entry_time TEXT NOT NULL,
+                        exit_time TEXT,
+                        entry_price REAL NOT NULL,
+                        exit_price REAL,
+                        realized_pnl REAL,
+                        entry_order_id TEXT,
+                        exit_order_id TEXT,
+                        exit_reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO trades SELECT * FROM trades_v1;
+                    DROP TABLE trades_v1;
+                    CREATE INDEX ix_trades_date_mode_underlying
+                        ON trades(trade_date, mode, underlying);
+                    ALTER TABLE daily_pnl ADD COLUMN crudeoil_pnl REAL NOT NULL DEFAULT 0;
+                    ALTER TABLE daily_pnl ADD COLUMN naturalgas_pnl REAL NOT NULL DEFAULT 0;
+                    ALTER TABLE daily_pnl ADD COLUMN gold_pnl REAL NOT NULL DEFAULT 0;
+                    ALTER TABLE daily_pnl ADD COLUMN silver_pnl REAL NOT NULL DEFAULT 0;
                     """
                 )
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -325,6 +361,10 @@ class Database:
             """SELECT
                 COALESCE(SUM(CASE WHEN underlying='NIFTY' THEN realized_pnl ELSE 0 END),0) nifty_pnl,
                 COALESCE(SUM(CASE WHEN underlying='SENSEX' THEN realized_pnl ELSE 0 END),0) sensex_pnl,
+                COALESCE(SUM(CASE WHEN underlying='CRUDEOIL' THEN realized_pnl ELSE 0 END),0) crudeoil_pnl,
+                COALESCE(SUM(CASE WHEN underlying='NATURALGAS' THEN realized_pnl ELSE 0 END),0) naturalgas_pnl,
+                COALESCE(SUM(CASE WHEN underlying='GOLD' THEN realized_pnl ELSE 0 END),0) gold_pnl,
+                COALESCE(SUM(CASE WHEN underlying='SILVER' THEN realized_pnl ELSE 0 END),0) silver_pnl,
                 COALESCE(SUM(realized_pnl),0) total_pnl,
                 COUNT(*) trade_count,
                 SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) winning_trades,
@@ -334,13 +374,17 @@ class Database:
         ).fetchone()
         connection.execute(
             """INSERT INTO daily_pnl(trade_date,mode,nifty_pnl,sensex_pnl,total_pnl,trade_count,
-                winning_trades,losing_trades,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
+                winning_trades,losing_trades,updated_at,crudeoil_pnl,naturalgas_pnl,gold_pnl,silver_pnl)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(trade_date,mode) DO UPDATE SET nifty_pnl=excluded.nifty_pnl,
                 sensex_pnl=excluded.sensex_pnl,total_pnl=excluded.total_pnl,
                 trade_count=excluded.trade_count,winning_trades=excluded.winning_trades,
-                losing_trades=excluded.losing_trades,updated_at=excluded.updated_at""",
+                losing_trades=excluded.losing_trades,updated_at=excluded.updated_at,
+                crudeoil_pnl=excluded.crudeoil_pnl,naturalgas_pnl=excluded.naturalgas_pnl,
+                gold_pnl=excluded.gold_pnl,silver_pnl=excluded.silver_pnl""",
             (trade_date, mode, row["nifty_pnl"], row["sensex_pnl"], row["total_pnl"],
-             row["trade_count"], row["winning_trades"], row["losing_trades"], now),
+             row["trade_count"], row["winning_trades"], row["losing_trades"], now,
+             row["crudeoil_pnl"], row["naturalgas_pnl"], row["gold_pnl"], row["silver_pnl"]),
         )
 
     def list_trades(
@@ -375,12 +419,16 @@ class Database:
             pnl_expression = "nifty_pnl"
         elif underlying.upper() == "SENSEX":
             pnl_expression = "sensex_pnl"
+        elif underlying.upper() in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"}:
+            pnl_expression = f"{underlying.lower()}_pnl"
         clauses, parameters = ["trade_date BETWEEN ? AND ?"], [start_date, end_date]
         if mode.upper() != "ALL":
             clauses.append("mode=?")
             parameters.append(mode.upper())
         return self.fetch_all(
             f"""SELECT trade_date,SUM(nifty_pnl) nifty_pnl,SUM(sensex_pnl) sensex_pnl,
+                SUM(crudeoil_pnl) crudeoil_pnl,SUM(naturalgas_pnl) naturalgas_pnl,
+                SUM(gold_pnl) gold_pnl,SUM(silver_pnl) silver_pnl,
                 SUM({pnl_expression}) total_pnl,SUM(trade_count) trade_count,
                 SUM(winning_trades) winning_trades,SUM(losing_trades) losing_trades
                 FROM daily_pnl WHERE {' AND '.join(clauses)} GROUP BY trade_date ORDER BY trade_date""",

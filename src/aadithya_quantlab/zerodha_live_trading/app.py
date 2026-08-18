@@ -42,6 +42,9 @@ TRADING_STATE_PATH = runtime_path("streamlit_dashboard_state.json")
 CREDENTIAL_SERVICE_NAME = "aadithya-zerodha-live-trading"
 API_KEY_ACCOUNT = "api-key"
 API_SECRET_ACCOUNT = "api-secret"
+ENTRY_START_IST = "09:16"
+ENTRY_CUTOFF_IST = "15:00"
+MANDATORY_EXIT_IST = "15:15"
 
 
 @st.cache_resource
@@ -57,13 +60,18 @@ def _authentication() -> AuthenticationService:
 @dataclass(frozen=True)
 class UnderlyingConfig:
     name: str
-    spot_instrument_token: int
+    spot_instrument_token: int | None
     option_symbol_prefix: str
     option_exchange: str
-    expiry_weekday: int
-    strike_step: int
+    expiry_weekday: int | None
     default_qty: int
     default_sl_points: float
+    default_lots: int = 1
+    lot_step: int = 1
+    signal_source: str = "SPOT"
+    entry_start_ist: str = ENTRY_START_IST
+    entry_cutoff_ist: str = ENTRY_CUTOFF_IST
+    mandatory_exit_ist: str = MANDATORY_EXIT_IST
 
 
 UNDERLYINGS: dict[str, UnderlyingConfig] = {
@@ -73,9 +81,10 @@ UNDERLYINGS: dict[str, UnderlyingConfig] = {
         option_symbol_prefix="NIFTY",
         option_exchange="NFO",
         expiry_weekday=1,
-        strike_step=50,
         default_qty=130,
         default_sl_points=20.0,
+        default_lots=2,
+        lot_step=2,
     ),
     "SENSEX": UnderlyingConfig(
         name="SENSEX",
@@ -83,11 +92,39 @@ UNDERLYINGS: dict[str, UnderlyingConfig] = {
         option_symbol_prefix="SENSEX",
         option_exchange="BFO",
         expiry_weekday=3,
-        strike_step=100,
         default_qty=40,
         default_sl_points=50.0,
+        default_lots=2,
+        lot_step=2,
+    ),
+    "CRUDEOIL": UnderlyingConfig(
+        name="CRUDEOIL", spot_instrument_token=None, option_symbol_prefix="CRUDEOIL",
+        option_exchange="MCX", expiry_weekday=None, default_qty=1, default_sl_points=20.0,
+        signal_source="FRONT_FUTURE", entry_start_ist="09:00", entry_cutoff_ist="22:30",
+        mandatory_exit_ist="22:50",
+    ),
+    "NATURALGAS": UnderlyingConfig(
+        name="NATURALGAS", spot_instrument_token=None, option_symbol_prefix="NATURALGAS",
+        option_exchange="MCX", expiry_weekday=None, default_qty=1, default_sl_points=20.0,
+        signal_source="FRONT_FUTURE", entry_start_ist="09:00", entry_cutoff_ist="22:30",
+        mandatory_exit_ist="22:50",
+    ),
+    "GOLD": UnderlyingConfig(
+        name="GOLD", spot_instrument_token=None, option_symbol_prefix="GOLD",
+        option_exchange="MCX", expiry_weekday=None, default_qty=1, default_sl_points=20.0,
+        signal_source="FRONT_FUTURE", entry_start_ist="09:00", entry_cutoff_ist="22:30",
+        mandatory_exit_ist="22:50",
+    ),
+    "SILVER": UnderlyingConfig(
+        name="SILVER", spot_instrument_token=None, option_symbol_prefix="SILVER",
+        option_exchange="MCX", expiry_weekday=None, default_qty=1, default_sl_points=20.0,
+        signal_source="FRONT_FUTURE", entry_start_ist="09:00", entry_cutoff_ist="22:30",
+        mandatory_exit_ist="22:50",
     ),
 }
+
+INDEX_NAMES = ("NIFTY", "SENSEX")
+COMMODITY_NAMES = ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER")
 
 
 QTY_BLOCKS: dict[str, int] = {
@@ -130,6 +167,16 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 def _is_cloud_runtime() -> bool:
     return _env_flag("ZERODHA_CLOUD_MODE")
+
+
+def _cloud_live_orders_enabled() -> bool:
+    """Require an explicit deployment-level opt-in for REAL cloud orders."""
+
+    return _is_cloud_runtime() and _env_flag("ZERODHA_ALLOW_REAL_TRADING")
+
+
+def _runtime_allows_live_orders() -> bool:
+    return not _is_cloud_runtime() or _cloud_live_orders_enabled()
 
 
 def _runtime_secret(name: str) -> str:
@@ -405,11 +452,75 @@ def _get_kite(api_key: str, access_token: str) -> KiteConnect:
     return kite
 
 
-def _fetch_spot_5m(kite: KiteConnect, cfg: UnderlyingConfig) -> pd.DataFrame:
+def _cached_exchange_instruments(kite: KiteConnect, exchange: str) -> list[dict[str, Any]]:
+    cache: dict[str, dict[str, Any]] = st.session_state.setdefault("instrument_master_cache", {})
+    now = datetime.now(IST)
+    cached = cache.get(exchange)
+    if isinstance(cached, dict):
+        fetched_at = pd.to_datetime(cached.get("fetched_at"), errors="coerce")
+        if not pd.isna(fetched_at):
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.tz_localize(IST)
+            if now - fetched_at.to_pydatetime() < timedelta(hours=6):
+                rows = cached.get("rows")
+                if isinstance(rows, list):
+                    return rows
+    rows = list(kite.instruments(exchange))
+    cache[exchange] = {"fetched_at": now.isoformat(), "rows": rows}
+    return rows
+
+
+def _row_matches_underlying(row: dict[str, Any], cfg: UnderlyingConfig) -> bool:
+    row_name = str(row.get("name", "")).strip().upper()
+    if row_name:
+        return row_name == cfg.name
+    symbol = str(row.get("tradingsymbol", "")).strip().upper()
+    if not symbol.startswith(cfg.option_symbol_prefix):
+        return False
+    suffix = symbol[len(cfg.option_symbol_prefix) :]
+    return bool(suffix) and suffix[0].isdigit()
+
+
+def _front_future_row(cfg: UnderlyingConfig, instrument_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    session_date = datetime.now(IST).date()
+    candidates: list[tuple[date, str, dict[str, Any]]] = []
+    for row in instrument_rows:
+        symbol = str(row.get("tradingsymbol", ""))
+        if not _row_matches_underlying(row, cfg):
+            continue
+        if str(row.get("instrument_type", "")).upper() != "FUT":
+            continue
+        expiry = pd.to_datetime(row.get("expiry"), errors="coerce")
+        if pd.isna(expiry) or expiry.date() < session_date:
+            continue
+        candidates.append((expiry.date(), symbol, row))
+    if not candidates:
+        raise ValueError(f"No live {cfg.name} MCX futures contract found.")
+    return sorted(candidates, key=lambda item: (item[0], item[1]))[0][2]
+
+
+def _signal_instrument(
+    cfg: UnderlyingConfig,
+    instrument_rows: list[dict[str, Any]] | None = None,
+) -> tuple[int, str]:
+    if cfg.signal_source == "SPOT":
+        if cfg.spot_instrument_token is None:
+            raise ValueError(f"No spot instrument token configured for {cfg.name}.")
+        return int(cfg.spot_instrument_token), cfg.name
+    future = _front_future_row(cfg, instrument_rows or [])
+    return int(future["instrument_token"]), str(future["tradingsymbol"])
+
+
+def _fetch_spot_5m(
+    kite: KiteConnect,
+    cfg: UnderlyingConfig,
+    instrument_rows: list[dict[str, Any]] | None = None,
+) -> pd.DataFrame:
     now_ist = datetime.now(IST)
-    start_dt = datetime.combine(now_ist.date() - timedelta(days=7), wall_time(9, 15), tzinfo=IST)
+    start_dt = datetime.combine(now_ist.date() - timedelta(days=7), wall_time(9, 0), tzinfo=IST)
+    instrument_token, signal_symbol = _signal_instrument(cfg, instrument_rows)
     rows = kite.historical_data(
-        cfg.spot_instrument_token,
+        instrument_token,
         start_dt,
         now_ist,
         "5minute",
@@ -420,6 +531,7 @@ def _fetch_spot_5m(kite: KiteConnect, cfg: UnderlyingConfig) -> pd.DataFrame:
     if frame.empty:
         return frame
     frame = frame.rename(columns={"date": "timestamp"})
+    frame["signal_symbol"] = signal_symbol
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
     frame = frame.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     return frame
@@ -456,7 +568,7 @@ def _build_price_chart(bars: pd.DataFrame, name: str) -> alt.LayerChart:
         alt.value("#ff5f6d"),
     )
     wicks = base.mark_rule(strokeWidth=1).encode(
-        y=alt.Y("low:Q", title=f"{name} spot", scale=alt.Scale(zero=False)),
+        y=alt.Y("low:Q", title=f"{name} signal price", scale=alt.Scale(zero=False)),
         y2="high:Q",
         color=candle_color,
     )
@@ -485,18 +597,20 @@ def _select_option_contract(
     side: str,
     spot_price: float,
     expiry_week_offset: int = 0,
+    instrument_rows: list[dict[str, Any]] | None = None,
 ) -> str:
-    option_rows = kite.instruments(cfg.option_exchange)
-    atm_strike = int(round(spot_price / float(cfg.strike_step)) * cfg.strike_step)
+    option_rows = instrument_rows if instrument_rows is not None else kite.instruments(cfg.option_exchange)
     option_type = "CE" if side == "CALL" else "PE"
     session_date = datetime.now(IST).date()
-    base_expiry = _next_expiry_weekday(session_date, cfg.expiry_weekday)
-    target_expiry = base_expiry + timedelta(days=7 * max(int(expiry_week_offset), 0))
+    target_expiry: date | None = None
+    if cfg.expiry_weekday is not None:
+        base_expiry = _next_expiry_weekday(session_date, cfg.expiry_weekday)
+        target_expiry = base_expiry + timedelta(days=7 * max(int(expiry_week_offset), 0))
 
-    pool: list[tuple[datetime.date, int, str]] = []
+    pool: list[tuple[date, float, str, int]] = []
     for row in option_rows:
         symbol = str(row.get("tradingsymbol", ""))
-        if not symbol.startswith(cfg.option_symbol_prefix):
+        if not _row_matches_underlying(row, cfg):
             continue
         if str(row.get("instrument_type", "")) != option_type:
             continue
@@ -506,23 +620,39 @@ def _select_option_contract(
         expiry_date = expiry.date()
         if expiry_date < session_date:
             continue
-        strike = int(_to_float(row.get("strike"), 0.0))
+        strike = _to_float(row.get("strike"), 0.0)
         if strike <= 0:
             continue
-        pool.append((expiry_date, abs(strike - atm_strike), symbol))
+        lot_size = int(_to_float(row.get("lot_size"), 0.0))
+        if lot_size <= 0:
+            continue
+        pool.append((expiry_date, abs(strike - spot_price), symbol, lot_size))
 
     if not pool:
         raise ValueError(f"No eligible {cfg.name} {option_type} contract found.")
 
-    exact_expiry = [r for r in pool if r[0] == target_expiry]
-    if exact_expiry:
-        candidates = exact_expiry
+    if target_expiry is not None:
+        exact_expiry = [r for r in pool if r[0] == target_expiry]
+        if exact_expiry:
+            candidates = exact_expiry
+        else:
+            post_target = [r for r in pool if r[0] >= target_expiry]
+            candidates = post_target if post_target else pool
     else:
-        post_target = [r for r in pool if r[0] >= target_expiry]
-        candidates = post_target if post_target else pool
-    expiry_date, _, symbol = sorted(candidates, key=lambda item: (item[0], item[1], item[2]))[0]
-    _ = expiry_date
+        nearest_expiry = min(row[0] for row in pool)
+        candidates = [row for row in pool if row[0] == nearest_expiry]
+    _, _, symbol, _ = sorted(candidates, key=lambda item: (item[0], item[1], item[2]))[0]
     return f"{cfg.option_exchange}:{symbol}"
+
+
+def _contract_lot_size(instrument: str, instrument_rows: list[dict[str, Any]]) -> int:
+    _, symbol = _split_instrument(instrument)
+    for row in instrument_rows:
+        if str(row.get("tradingsymbol", "")) == symbol:
+            lot_size = int(_to_float(row.get("lot_size"), 0.0))
+            if lot_size > 0:
+                return lot_size
+    raise ValueError(f"No valid lot size found for {instrument}.")
 
 
 def _extract_ltp(kite: KiteConnect, instrument: str) -> float:
@@ -594,6 +724,7 @@ def _default_state_for(cfg: UnderlyingConfig) -> dict[str, Any]:
         "events": [],
         "order_logs": [],
         "quantity": cfg.default_qty,
+        "lots": cfg.default_lots,
         "sl_points": cfg.default_sl_points,
         "sl_to_cost_profit_pct": 0.30,
         "trail_after_profit_pct": 0.50,
@@ -784,7 +915,7 @@ def _entries_blocked_for_expiry_day(
 def _live_orders_permitted(engine: dict[str, Any], real_mode_armed: bool) -> bool:
     return (
         bool(real_mode_armed)
-        and not _is_cloud_runtime()
+        and _runtime_allows_live_orders()
         and not bool(engine.get("reconciliation_required", False))
     )
 
@@ -838,10 +969,11 @@ def _run_engine_for(
     expiry_week_offset: int,
     trade_mode: str,
     real_mode_armed: bool,
+    instrument_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now_ist = datetime.now(IST)
 
-    bars = _fetch_spot_5m(kite, cfg)
+    bars = _fetch_spot_5m(kite, cfg, instrument_rows)
     if bars.empty:
         engine["entry_status"] = "No market data returned"
         return engine
@@ -855,6 +987,8 @@ def _run_engine_for(
     engine["latest_bars"] = display_bars.tail(80).copy()
     engine["latest_spot"] = latest_close
     engine["latest_time"] = latest_time
+    if "signal_symbol" in display_bars.columns:
+        engine["signal_symbol"] = str(display_bars.iloc[-1]["signal_symbol"])
 
     open_trade = engine.get("open_trade")
     if isinstance(open_trade, dict) and open_trade:
@@ -960,7 +1094,10 @@ def _run_engine_for(
     if not bool(engine.get("enabled", True)):
         engine["entry_status"] = "Trade logic is OFF"
         return engine
-    if _entries_blocked_for_expiry_day(now_ist.weekday(), cfg.expiry_weekday, expiry_week_offset):
+    if (
+        cfg.expiry_weekday is not None
+        and _entries_blocked_for_expiry_day(now_ist.weekday(), cfg.expiry_weekday, expiry_week_offset)
+    ):
         engine["entry_status"] = "Current-week entries blocked on expiry weekday; select Next week to trade"
         return engine
     if now_ist.time() < entry_start or now_ist.time() > entry_end:
@@ -1000,11 +1137,20 @@ def _run_engine_for(
         side,
         spot_price,
         expiry_week_offset=expiry_week_offset,
+        instrument_rows=instrument_rows,
     )
     entry_option = _extract_ltp(kite, instrument)
     sl_points = _to_float(engine.get("sl_points"), cfg.default_sl_points)
     stop_price = max(entry_option - sl_points, 0.05)
-    qty = int(engine.get("quantity", cfg.default_qty))
+    if cfg.signal_source == "FRONT_FUTURE":
+        if not instrument_rows:
+            raise ValueError(f"MCX instrument master is unavailable for {cfg.name}.")
+        lot_size = _contract_lot_size(instrument, instrument_rows)
+        qty = lot_size * max(1, int(engine.get("lots", cfg.default_lots)))
+        engine["quantity"] = qty
+        engine["lot_size"] = lot_size
+    else:
+        qty = int(engine.get("quantity", cfg.default_qty))
 
     entry_order_id = "PAPER"
     if trade_mode == "REAL":
@@ -1072,6 +1218,12 @@ def _run_engine_for(
 
 def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
     st.subheader(name)
+    cfg = UNDERLYINGS[name]
+    signal_symbol = str(engine.get("signal_symbol", name))
+    st.caption(
+        f"Signal: {signal_symbol} · EMA 3/30 · entries to {cfg.entry_cutoff_ist} IST · "
+        f"exit {cfg.mandatory_exit_ist} IST"
+    )
     left, right = st.columns([1.1, 1.9])
     with left:
         st.metric("Realized P&L", f"{_to_float(engine.get('realized_pnl')):.2f}")
@@ -1143,35 +1295,40 @@ def _render_live_engine(trade_mode: str, real_mode_armed: bool, expiry_week_offs
         st.rerun(scope="app")
     with st.container(border=True):
         st.subheader(":material/monitoring: 3) Live market and trade engine")
-        entry_start = _parse_hhmm("09:16")
-        entry_end = _parse_hhmm("12:59")
-        force_exit = _parse_hhmm("15:25")
+        st.caption(
+            f"Entry window: {ENTRY_START_IST}-{ENTRY_CUTOFF_IST} IST (15:00 inclusive) · "
+            f"mandatory exit: {MANDATORY_EXIT_IST} IST. MCX entries: 09:00-22:30 IST · mandatory exit: 22:50 IST."
+        )
 
         if st.session_state.connected:
             try:
                 kite = _get_kite(st.session_state.api_key, st.session_state.access_token)
                 _ = kite.profile()
+                mcx_rows = _cached_exchange_instruments(kite, "MCX")
                 for name, cfg in UNDERLYINGS.items():
                     state = st.session_state.engine_state[name]
                     st.session_state.engine_state[name] = _run_engine_for(
                         kite=kite,
                         cfg=cfg,
                         engine=state,
-                        entry_start=entry_start,
-                        entry_end=entry_end,
-                        force_exit=force_exit,
+                        entry_start=_parse_hhmm(cfg.entry_start_ist),
+                        entry_end=_parse_hhmm(cfg.entry_cutoff_ist),
+                        force_exit=_parse_hhmm(cfg.mandatory_exit_ist),
                         expiry_week_offset=expiry_week_offset,
                         trade_mode=trade_mode,
                         real_mode_armed=real_mode_armed,
+                        instrument_rows=mcx_rows if cfg.option_exchange == "MCX" else None,
                     )
                 _persist_engine_state(st.session_state.engine_state)
 
-                n_state = st.session_state.engine_state["NIFTY"]
-                s_state = st.session_state.engine_state["SENSEX"]
-                n_upnl = _to_float((n_state.get("open_trade") or {}).get("unrealized"), 0.0)
-                s_upnl = _to_float((s_state.get("open_trade") or {}).get("unrealized"), 0.0)
-                total_realized = _to_float(n_state.get("realized_pnl"), 0.0) + _to_float(s_state.get("realized_pnl"), 0.0)
-                total_unrealized = n_upnl + s_upnl
+                total_realized = sum(
+                    _to_float(state.get("realized_pnl"), 0.0)
+                    for state in st.session_state.engine_state.values()
+                )
+                total_unrealized = sum(
+                    _to_float((state.get("open_trade") or {}).get("unrealized"), 0.0)
+                    for state in st.session_state.engine_state.values()
+                )
 
                 m1, m2, m3 = st.columns(3)
                 with m1:
@@ -1181,11 +1338,12 @@ def _render_live_engine(trade_mode: str, real_mode_armed: bool, expiry_week_offs
                 with m3:
                     st.metric("Grand Total P&L", f"{(total_realized + total_unrealized):.2f}")
 
-                left, right = st.columns(2)
-                with left:
-                    _render_underlying_card("NIFTY", n_state)
-                with right:
-                    _render_underlying_card("SENSEX", s_state)
+                names = list(UNDERLYINGS)
+                for start in range(0, len(names), 2):
+                    columns = st.columns(2)
+                    for column, name in zip(columns, names[start : start + 2]):
+                        with column:
+                            _render_underlying_card(name, st.session_state.engine_state[name])
             except Exception as error:
                 st.error(f"Live engine error: {type(error).__name__}: {error}")
         else:
@@ -1221,10 +1379,12 @@ def _init_session_state() -> None:
             state = st.session_state.engine_state.setdefault(name, {})
             for key, value in _default_state_for(cfg).items():
                 state.setdefault(key, value)
-    if "nifty_turn_off" not in st.session_state:
-        st.session_state.nifty_turn_off = not bool(st.session_state.engine_state["NIFTY"].get("enabled", True))
-    if "sensex_turn_off" not in st.session_state:
-        st.session_state.sensex_turn_off = not bool(st.session_state.engine_state["SENSEX"].get("enabled", True))
+    for name in UNDERLYINGS:
+        toggle_key = f"{name.lower()}_turn_off"
+        if toggle_key not in st.session_state:
+            st.session_state[toggle_key] = not bool(
+                st.session_state.engine_state[name].get("enabled", True)
+            )
     if "connection_restored" not in st.session_state:
         st.session_state.connection_restored = False
     if "risk_settings_saved_at" not in st.session_state:
@@ -1272,10 +1432,27 @@ def _require_dashboard_login() -> dict[str, object]:
     st.session_state.pop("dashboard_session_token", None)
     st.markdown("## :material/lock: Dashboard sign in")
     if not _database().owner_exists():
-        st.error(
-            "No OWNER account exists. Set ZERODHA_OWNER_USERNAME and ZERODHA_OWNER_PASSWORD "
-            "in the runtime environment, then restart once to bootstrap the owner securely."
-        )
+        if _is_cloud_runtime():
+            st.error(
+                "No OWNER account exists. Set ZERODHA_OWNER_USERNAME and ZERODHA_OWNER_PASSWORD "
+                "as deployment secrets, then restart once to bootstrap the owner securely."
+            )
+            st.stop()
+        st.info("First local run: create the OWNER account. The password is hashed before storage.")
+        with st.form("local_owner_bootstrap", clear_on_submit=True):
+            owner_username = st.text_input("OWNER username or email")
+            owner_password = st.text_input("OWNER password", type="password")
+            owner_confirmation = st.text_input("Confirm OWNER password", type="password")
+            create_owner = st.form_submit_button(
+                "Create OWNER account", type="primary", icon=":material/admin_panel_settings:", width="stretch"
+            )
+        if create_owner:
+            try:
+                auth.bootstrap_local_owner(owner_username, owner_password, owner_confirmation)
+                st.success("OWNER account created. Sign in with the new credentials.")
+                st.rerun()
+            except ValueError as error:
+                st.error(str(error))
         st.stop()
 
     with st.form("dashboard_login", clear_on_submit=True):
@@ -1333,7 +1510,7 @@ def _render_trade_history_page() -> None:
     end = middle.date_input("To", value=date.today(), key="history_end")
     mode = right.segmented_control("Mode", ["All", "PAPER", "REAL"], default="All", key="history_mode")
     underlying = st.segmented_control(
-        "Underlying", ["All", "NIFTY", "SENSEX"], default="All", key="history_underlying"
+        "Underlying", ["All", *UNDERLYINGS.keys()], default="All", key="history_underlying"
     )
     rows = _database().list_trades(
         start_date=start.isoformat(), end_date=end.isoformat(), mode=str(mode), underlying=str(underlying)
@@ -1365,7 +1542,7 @@ def _render_pnl_calendar_page() -> None:
     month = c1.selectbox("Month", list(range(1, 13)), index=today.month - 1, format_func=lambda value: calendar.month_name[value])
     year = int(c2.number_input("Year", min_value=2020, max_value=2100, value=today.year, step=1))
     mode = c3.segmented_control("Mode", ["All", "PAPER", "REAL"], default="All", key="calendar_mode")
-    underlying = c4.segmented_control("Underlying", ["All", "NIFTY", "SENSEX"], default="All", key="calendar_underlying")
+    underlying = c4.selectbox("Underlying", ["All", *UNDERLYINGS.keys()], key="calendar_underlying")
     start, end = month_bounds(year, int(month))
     rows = _database().daily_pnl(start.isoformat(), end.isoformat(), str(mode), str(underlying))
     thresholds = _load_thresholds()
@@ -1395,8 +1572,8 @@ def _render_pnl_calendar_page() -> None:
     wins = int(selected_daily.get("winning_trades", 0))
     with st.container(horizontal=True):
         st.metric("Total P&L", _format_inr(selected_daily.get("total_pnl")), border=True)
-        st.metric("NIFTY P&L", _format_inr(selected_daily.get("nifty_pnl")), border=True)
-        st.metric("SENSEX P&L", _format_inr(selected_daily.get("sensex_pnl")), border=True)
+        for name in UNDERLYINGS:
+            st.metric(f"{name} P&L", _format_inr(selected_daily.get(f"{name.lower()}_pnl")), border=True)
         st.metric("Trades", count, border=True)
         st.metric("Wins / losses", f"{wins} / {int(selected_daily.get('losing_trades', 0))}", border=True)
         st.metric("Win rate", f"{(wins / count * 100.0) if count else 0.0:.1f}%", border=True)
@@ -1544,9 +1721,16 @@ def main() -> None:
 
     st.markdown("## :material/candlestick_chart: Zerodha live trade control center")
     if _is_cloud_runtime():
-        st.warning(
-            "Cloud safety mode is active: PAPER execution only. REAL broker orders are hard-disabled in this deployment."
-        )
+        if _cloud_live_orders_enabled():
+            st.error(
+                "Cloud REAL-order capability is enabled for this deployment. Actual Zerodha orders can be sent only "
+                "after OWNER login, REAL mode selection, manual arming, and successful reconciliation."
+            )
+        else:
+            st.warning(
+                "Cloud safety mode is active: PAPER execution only. Set ZERODHA_ALLOW_REAL_TRADING=true at the "
+                "deployment level to permit supervised REAL orders."
+            )
     h1, h2 = st.columns([2.2, 1.2])
     with h1:
         st.caption("Direct Zerodha data feed, dual-underlying execution, and in-session risk tracking.")
@@ -1666,74 +1850,41 @@ def main() -> None:
 
     with st.container(border=True):
         st.subheader(":material/tune: 2) Trade controls")
-        c1, c2, c3 = st.columns(3)
-        nifty_enabled = bool(st.session_state.engine_state["NIFTY"].get("enabled", True))
-        sensex_enabled = bool(st.session_state.engine_state["SENSEX"].get("enabled", True))
+        if st.button("Refresh now", width="stretch"):
+            st.rerun()
 
-        with c1:
-            if st.button(
-                "Start NIFTY trade logic",
-                width="stretch",
-                disabled=bool(st.session_state.engine_state["NIFTY"].get("reconciliation_required")),
-            ):
-                st.session_state.engine_state["NIFTY"]["enabled"] = True
-                st.session_state.nifty_turn_off = False
-                nifty_enabled = True
-        with c2:
-            if st.button(
-                "Start SENSEX trade logic",
-                width="stretch",
-                disabled=bool(st.session_state.engine_state["SENSEX"].get("reconciliation_required")),
-            ):
-                st.session_state.engine_state["SENSEX"]["enabled"] = True
-                st.session_state.sensex_turn_off = False
-                sensex_enabled = True
-        with c3:
-            if st.button("Refresh now", width="stretch"):
-                st.rerun()
-
-        o1, o2 = st.columns(2)
-        with o1:
-            nifty_turn_off = st.toggle(
-                "Turn OFF NIFTY",
-                key="nifty_turn_off",
-                disabled=bool(st.session_state.engine_state["NIFTY"].get("reconciliation_required")),
-            )
-        with o2:
-            sensex_turn_off = st.toggle(
-                "Turn OFF SENSEX",
-                key="sensex_turn_off",
-                disabled=bool(st.session_state.engine_state["SENSEX"].get("reconciliation_required")),
-            )
-
-        st.session_state.engine_state["NIFTY"]["enabled"] = (
-            not nifty_turn_off
-            and not bool(st.session_state.engine_state["NIFTY"].get("reconciliation_required"))
-        )
-        st.session_state.engine_state["SENSEX"]["enabled"] = (
-            not sensex_turn_off
-            and not bool(st.session_state.engine_state["SENSEX"].get("reconciliation_required"))
-        )
-        n_status = "RUNNING" if st.session_state.engine_state["NIFTY"]["enabled"] else "OFF"
-        s_status = "RUNNING" if st.session_state.engine_state["SENSEX"]["enabled"] else "OFF"
-        st.caption(f"Trade logic status -> NIFTY: {n_status} | SENSEX: {s_status}")
-
-        hard_nifty, hard_sensex = st.columns(2)
-        with hard_nifty:
-            if st.button("Hard stop NIFTY", type="primary", width="stretch"):
-                st.session_state.engine_state["NIFTY"]["enabled"] = False
-                st.session_state.engine_state["NIFTY"]["hard_stop_requested"] = True
-                st.session_state.nifty_turn_off = True
-                _persist_engine_state(st.session_state.engine_state)
-                st.rerun()
-        with hard_sensex:
-            if st.button("Hard stop SENSEX", type="primary", width="stretch"):
-                st.session_state.engine_state["SENSEX"]["enabled"] = False
-                st.session_state.engine_state["SENSEX"]["hard_stop_requested"] = True
-                st.session_state.sensex_turn_off = True
-                _persist_engine_state(st.session_state.engine_state)
-                st.rerun()
-        st.caption("Hard stop closes that index's open position and keeps only that index OFF. REAL exits require REAL confirmation to remain armed.")
+        for start in range(0, len(UNDERLYINGS), 3):
+            names = list(UNDERLYINGS)[start : start + 3]
+            columns = st.columns(3)
+            for column, name in zip(columns, names):
+                state = st.session_state.engine_state[name]
+                toggle_key = f"{name.lower()}_turn_off"
+                with column:
+                    with st.container(border=True):
+                        st.markdown(f"**{name}**")
+                        if st.button(
+                            f"Start {name}", key=f"start_{name}", width="stretch",
+                            disabled=bool(state.get("reconciliation_required")),
+                        ):
+                            state["enabled"] = True
+                            st.session_state[toggle_key] = False
+                        turned_off = st.toggle(
+                            f"Turn OFF {name}", key=toggle_key,
+                            disabled=bool(state.get("reconciliation_required")),
+                        )
+                        state["enabled"] = not turned_off and not bool(state.get("reconciliation_required"))
+                        if st.button(f"Hard stop {name}", key=f"hard_stop_{name}", type="primary", width="stretch"):
+                            state["enabled"] = False
+                            state["hard_stop_requested"] = True
+                            st.session_state[toggle_key] = True
+                            _persist_engine_state(st.session_state.engine_state)
+                            st.rerun()
+                        status = "RUNNING" if state["enabled"] else "OFF"
+                        cfg = UNDERLYINGS[name]
+                        st.caption(
+                            f"{status} · entries to {cfg.entry_cutoff_ist} IST · exit {cfg.mandatory_exit_ist} IST"
+                        )
+        st.caption("Hard stop closes that instrument's open position and keeps only that strategy OFF. REAL exits require REAL confirmation to remain armed.")
 
         reconciliation_required = any(
             bool(state.get("reconciliation_required"))
@@ -1790,12 +1941,18 @@ def main() -> None:
             )
 
         if trade_mode == "REAL":
-            if _is_cloud_runtime():
-                st.error("REAL mode is unavailable in cloud deployments. Use a supervised local session after reconciliation.")
+            if not _runtime_allows_live_orders():
+                st.error(
+                    "REAL mode is locked by the deployment. Set ZERODHA_ALLOW_REAL_TRADING=true and redeploy, "
+                    "then complete broker reconciliation."
+                )
             elif reconciliation_required:
                 st.error("REAL mode remains blocked until broker reconciliation succeeds.")
             elif real_mode_armed:
-                st.warning("REAL mode armed: new ENTRY/EXIT signals will place live market orders.")
+                location = "cloud" if _is_cloud_runtime() else "local"
+                st.warning(
+                    f"REAL mode armed in this {location} session: new ENTRY/EXIT signals will place live market orders."
+                )
             else:
                 st.info("REAL mode selected but not armed. Signals will be logged, but no live order is placed.")
         else:
@@ -1810,35 +1967,40 @@ def main() -> None:
         )
         expiry_week_offset = 1 if expiry_mode == "Next week" else 0
         st.success(f"Selected expiry: {expiry_mode}")
-        st.caption(f"Option contract filter: {expiry_mode} expiry for both NIFTY and SENSEX.")
+        st.caption(
+            f"Index option filter: {expiry_mode}. MCX uses the nearest live futures chart and nearest option expiry."
+        )
 
-        c5, c6, c7, c8 = st.columns(4)
-        with c5:
-            nifty_lot_size = LOT_SIZES["NIFTY"]
-            nifty_qty = int(st.session_state.engine_state["NIFTY"].get("quantity", 130))
-            nifty_lots = _normalize_lots(nifty_qty / float(nifty_lot_size), min_lots=2, lot_step=2)
-            selected_nifty_lots = int(
-                st.number_input("NIFTY lots", min_value=2, value=nifty_lots, step=2)
-            )
-            st.session_state.engine_state["NIFTY"]["quantity"] = selected_nifty_lots * nifty_lot_size
-            st.caption(f"NIFTY quantity: {st.session_state.engine_state['NIFTY']['quantity']}")
-        with c6:
-            sensex_lot_size = LOT_SIZES["SENSEX"]
-            sensex_qty = int(st.session_state.engine_state["SENSEX"].get("quantity", 40))
-            sensex_lots = _normalize_lots(sensex_qty / float(sensex_lot_size), min_lots=2, lot_step=2)
-            selected_sensex_lots = int(
-                st.number_input("SENSEX lots", min_value=2, value=sensex_lots, step=2)
-            )
-            st.session_state.engine_state["SENSEX"]["quantity"] = selected_sensex_lots * sensex_lot_size
-            st.caption(f"SENSEX quantity: {st.session_state.engine_state['SENSEX']['quantity']}")
-        with c7:
-            st.session_state.engine_state["NIFTY"]["max_trades"] = int(
-                st.number_input("NIFTY Max Trades", min_value=1, value=int(st.session_state.engine_state["NIFTY"].get("max_trades", 3)), step=1)
-            )
-        with c8:
-            st.session_state.engine_state["SENSEX"]["max_trades"] = int(
-                st.number_input("SENSEX Max Trades", min_value=1, value=int(st.session_state.engine_state["SENSEX"].get("max_trades", 3)), step=1)
-            )
+        st.markdown("**Position sizing and daily limits**")
+        for start in range(0, len(UNDERLYINGS), 3):
+            names = list(UNDERLYINGS)[start : start + 3]
+            columns = st.columns(3)
+            for column, name in zip(columns, names):
+                cfg = UNDERLYINGS[name]
+                state = st.session_state.engine_state[name]
+                with column:
+                    lots = int(
+                        st.number_input(
+                            f"{name} lots", min_value=cfg.default_lots,
+                            value=max(cfg.default_lots, int(state.get("lots", cfg.default_lots))),
+                            step=cfg.lot_step, key=f"lots_{name}",
+                        )
+                    )
+                    state["lots"] = lots
+                    if name in LOT_SIZES:
+                        state["quantity"] = lots * LOT_SIZES[name]
+                        st.caption(f"Quantity: {state['quantity']}")
+                    elif state.get("lot_size"):
+                        st.caption(f"Current quantity: {lots * int(state['lot_size'])}")
+                    else:
+                        st.caption("Quantity resolves from the selected MCX contract lot size.")
+                    state["max_trades"] = int(
+                        st.number_input(
+                            f"{name} max trades", min_value=1,
+                            value=int(state.get("max_trades", 3)), step=1,
+                            key=f"max_trades_{name}",
+                        )
+                    )
 
         _, reset_column, _ = st.columns(3)
         with reset_column:
@@ -1859,10 +2021,10 @@ def main() -> None:
                 st.session_state.engine_state = {
                     name: _default_state_for(cfg) for name, cfg in UNDERLYINGS.items()
                 }
-                st.session_state.nifty_turn_off = False
-                st.session_state.sensex_turn_off = False
+                for name in UNDERLYINGS:
+                    st.session_state[f"{name.lower()}_turn_off"] = False
                 _persist_engine_state(st.session_state.engine_state)
-                st.success("Durable PAPER engine state reset for NIFTY and SENSEX.")
+                st.success("Durable PAPER engine state reset for all instruments.")
 
         with st.expander("Trailing stop settings", expanded=True):
             for name in UNDERLYINGS:
@@ -1920,7 +2082,7 @@ def main() -> None:
     _persist_engine_state(st.session_state.engine_state)
     effective_real_mode_armed = (
         bool(real_mode_armed)
-        and not _is_cloud_runtime()
+        and _runtime_allows_live_orders()
         and not any(
             bool(state.get("reconciliation_required"))
             for state in st.session_state.engine_state.values()

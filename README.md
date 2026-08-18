@@ -39,15 +39,22 @@ streamlit run src/aadithya_quantlab/zerodha_live_trading/app.py
 
 This dashboard is isolated in `aadithya_quantlab.zerodha_live_trading`. It
 starts in PAPER mode; REAL orders require selecting REAL and separately arming
-the live-order confirmation.
+the live-order confirmation. New EMA crossover entries are accepted through
+15:00 IST (inclusive), and every remaining open trade is exited at 15:15 IST.
+
+The same EMA 3/30 workflow also supports MCX CRUDEOIL, NATURALGAS, GOLD, and
+SILVER options. Each commodity chart follows its nearest live futures contract;
+CALL/PUT entries use the nearest-expiry ATM option and the lot size reported by
+Zerodha's current instrument master. Commodity entries are accepted through
+22:30 IST and remaining positions are exited at 22:50 IST.
 
 ## Zerodha dashboard: Docker and Azure Container Apps
 
-The container deployment is intentionally PAPER-only. `ZERODHA_CLOUD_MODE=true`
-hard-blocks broker order placement even if a browser user selects REAL. Local
-Windows sessions retain the existing supervised REAL-mode confirmation, but a
-restarted session must reconcile recovered broker activity before it can be
-armed again.
+Container deployments remain PAPER-only by default. When
+`ZERODHA_CLOUD_MODE=true`, broker order placement additionally requires the
+deployment-level switch `ZERODHA_ALLOW_REAL_TRADING=true`. REAL orders still
+require an OWNER session to select REAL, manually arm the confirmation, and
+reconcile any recovered broker activity after a restart.
 
 ### Local Docker
 
@@ -61,6 +68,7 @@ docker run --rm -p 8501:8501 `
   --name zerodha-dashboard `
   --mount source=zerodha-dashboard-data,target=/mnt/zerodha `
   --env ZERODHA_CLOUD_MODE=true `
+  --env ZERODHA_ALLOW_REAL_TRADING=false `
   --env ZERODHA_API_KEY=$env:ZERODHA_API_KEY `
   --env ZERODHA_API_SECRET=$env:ZERODHA_API_SECRET `
   --env ZERODHA_OWNER_USERNAME=$env:ZERODHA_OWNER_USERNAME `

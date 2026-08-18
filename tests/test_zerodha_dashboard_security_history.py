@@ -179,6 +179,22 @@ def test_viewer_creation_validates_confirmation_and_unique_username(
         service.create_viewer(actor, "VIEWER@example.com", "Viewer password 4!", "Viewer password 4!")
 
 
+def test_first_local_owner_can_be_created_interactively(tmp_path: Path) -> None:
+    service = AuthenticationService(Database(tmp_path / "local-owner.db"))
+
+    owner_id = service.bootstrap_local_owner(
+        "Owner@Example.com", "Strong owner password 7!", "Strong owner password 7!"
+    )
+
+    owner = service.database.get_user(owner_id)
+    assert owner is not None
+    assert owner["username"] == "owner@example.com"
+    assert owner["role"] == "OWNER"
+    assert owner["password_hash"] != "Strong owner password 7!"
+    with pytest.raises(ValueError, match="already exists"):
+        service.bootstrap_local_owner("second-owner", "Another password 8!", "Another password 8!")
+
+
 def _trade(key: str, underlying: str = "NIFTY", pnl_date: str = "2026-08-14") -> dict[str, object]:
     return {
         "trade_key": key,
@@ -236,6 +252,23 @@ def test_database_and_trade_persistence_daily_aggregation_and_duplicate_preventi
     assert daily["sensex_pnl"] == -500.0
     assert daily["total_pnl"] == -250.0
     assert daily["trade_count"] == 2
+
+
+def test_database_accepts_and_aggregates_mcx_commodity_trades(tmp_path: Path) -> None:
+    database = Database(tmp_path / "commodity.db")
+    trade_id = database.upsert_open_trade(_trade("gold-1", "GOLD"))
+    database.complete_trade(
+        trade_id,
+        exit_time="2026-08-14T22:50:00+05:30",
+        exit_price=150.0,
+        realized_pnl=500.0,
+        exit_order_id=None,
+        exit_reason="EOD_CLOSE",
+    )
+
+    daily = database.daily_pnl("2026-08-14", "2026-08-14", underlying="GOLD")[0]
+    assert daily["gold_pnl"] == 500.0
+    assert daily["total_pnl"] == 500.0
 
 
 @pytest.mark.parametrize(

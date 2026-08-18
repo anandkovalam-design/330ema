@@ -100,6 +100,31 @@ class AuthenticationService:
         self.database.log_security_event("OWNER_BOOTSTRAPPED", user_id=user_id, details="environment bootstrap")
         return True
 
+    def bootstrap_local_owner(self, username: str, password: str, confirmation: str) -> int:
+        """Create the first OWNER interactively without persisting plaintext credentials."""
+
+        if self.database.owner_exists():
+            raise ValueError("An OWNER account already exists.")
+        normalized_username = username.strip().lower()
+        if not normalized_username:
+            raise ValueError("OWNER username is required.")
+        if password != confirmation:
+            raise ValueError("Password and confirmation do not match.")
+        try:
+            user_id = self.database.create_user(
+                normalized_username,
+                hash_password(password),
+                role="OWNER",
+            )
+        except sqlite3.IntegrityError as error:
+            raise ValueError("That username already exists.") from error
+        self.database.log_security_event(
+            "OWNER_BOOTSTRAPPED",
+            user_id=user_id,
+            details="interactive local bootstrap",
+        )
+        return user_id
+
     def login(self, username: str, password: str, client: ClientContext) -> str | None:
         normalized_username = username.strip().lower()
         now = datetime.now(timezone.utc)
