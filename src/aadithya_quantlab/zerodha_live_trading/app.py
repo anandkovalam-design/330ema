@@ -21,8 +21,11 @@ from aadithya_quantlab.zerodha_live_trading.auth import (
 )
 from aadithya_quantlab.zerodha_live_trading.database import Database
 from aadithya_quantlab.zerodha_live_trading.persistence import (
+    acknowledge_hard_stop_requests,
     load_daily_connection,
     load_engine_state,
+    load_hard_stop_requests,
+    request_hard_stop,
     runtime_path,
     save_daily_connection,
     save_engine_state,
@@ -39,6 +42,7 @@ IST = ZoneInfo("Asia/Kolkata")
 CONNECTION_STORE_PATH = runtime_path("streamlit_dashboard_connection.json")
 RISK_SETTINGS_PATH = runtime_path("live_trading_risk_settings.json")
 TRADING_STATE_PATH = runtime_path("streamlit_dashboard_state.json")
+HARD_STOP_COMMAND_PATH = runtime_path("hard_stop_commands.json")
 CREDENTIAL_SERVICE_NAME = "aadithya-zerodha-live-trading"
 API_KEY_ACCOUNT = "api-key"
 API_SECRET_ACCOUNT = "api-secret"
@@ -1058,6 +1062,17 @@ def _persist_engine_state(engine_state: dict[str, dict[str, Any]]) -> None:
     )
 
 
+def _apply_pending_hard_stops(engine_state: dict[str, dict[str, Any]]) -> set[str]:
+    pending = set(load_hard_stop_requests(HARD_STOP_COMMAND_PATH))
+    for name in pending:
+        state = engine_state.get(name)
+        if not isinstance(state, dict):
+            continue
+        state["enabled"] = False
+        state["hard_stop_requested"] = True
+    return pending
+
+
 def _has_unverified_broker_activity(state: dict[str, Any]) -> bool:
     open_trade = state.get("open_trade")
     if isinstance(open_trade, dict) and str(open_trade.get("trade_mode", "PAPER")).upper() == "REAL":
@@ -1850,6 +1865,7 @@ def _render_live_engine(
                 kite = _get_kite(st.session_state.api_key, st.session_state.access_token)
                 _ = kite.profile()
                 mcx_rows = _cached_exchange_instruments(kite, "MCX")
+                pending_hard_stops = _apply_pending_hard_stops(st.session_state.engine_state)
                 for name, cfg in UNDERLYINGS.items():
                     state = st.session_state.engine_state[name]
                     contract_expiry_offset = (
@@ -1882,6 +1898,14 @@ def _render_live_engine(
                             instrument_rows=mcx_rows,
                         )
                     st.session_state.engine_state[name] = state
+                completed_hard_stops = {
+                    name
+                    for name in pending_hard_stops
+                    if name in st.session_state.engine_state
+                    and not bool(st.session_state.engine_state[name].get("hard_stop_requested", False))
+                }
+                if completed_hard_stops:
+                    acknowledge_hard_stop_requests(HARD_STOP_COMMAND_PATH, completed_hard_stops)
                 _persist_engine_state(st.session_state.engine_state)
 
                 total_realized = sum(
@@ -2598,6 +2622,11 @@ def main() -> None:
                             state["enabled"] = False
                             state["hard_stop_requested"] = True
                             st.session_state[toggle_key] = True
+                            request_hard_stop(
+                                HARD_STOP_COMMAND_PATH,
+                                underlying=name,
+                                requested_at=datetime.now(IST),
+                            )
                             _persist_engine_state(st.session_state.engine_state)
                             st.rerun()
                         status = "RUNNING" if state["enabled"] else "OFF"

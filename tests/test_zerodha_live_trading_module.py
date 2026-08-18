@@ -17,6 +17,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _credential_preview,
     _clear_login_credentials,
     _default_state_for,
+    _apply_pending_hard_stops,
     _enforce_universal_trail_start,
     _entries_blocked_for_expiry_day,
     _front_future_row,
@@ -42,6 +43,11 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _safe_trade_frame,
     _update_trailing_stop,
     UNDERLYINGS,
+)
+from aadithya_quantlab.zerodha_live_trading.persistence import (
+    acknowledge_hard_stop_requests,
+    load_hard_stop_requests,
+    request_hard_stop,
 )
 
 
@@ -694,6 +700,23 @@ def test_nifty_hard_stop_closes_paper_position_and_keeps_engine_off(monkeypatch)
     assert result["realized_pnl"] == 1300.0
     assert result["enabled"] is False
     assert result["entry_status"] == "Hard stopped; entries disabled"
+
+
+def test_hard_stop_request_crosses_streamlit_sessions(tmp_path, monkeypatch) -> None:
+    command_path = tmp_path / "hard_stop_commands.json"
+    controls_session_state = _default_state_for(UNDERLYINGS["SILVER"])
+    live_session_state = {"SILVER": _default_state_for(UNDERLYINGS["SILVER"])}
+    monkeypatch.setattr(app, "HARD_STOP_COMMAND_PATH", command_path)
+
+    controls_session_state["hard_stop_requested"] = True
+    request_hard_stop(command_path, underlying="SILVER", requested_at=datetime.now())
+
+    assert live_session_state["SILVER"]["hard_stop_requested"] is False
+    assert _apply_pending_hard_stops(live_session_state) == {"SILVER"}
+    assert live_session_state["SILVER"]["enabled"] is False
+    assert live_session_state["SILVER"]["hard_stop_requested"] is True
+    acknowledge_hard_stop_requests(command_path, {"SILVER"})
+    assert load_hard_stop_requests(command_path) == {}
 
 
 def test_credentials_round_trip_through_keyring(monkeypatch) -> None:

@@ -157,3 +157,34 @@ def load_engine_state(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, 
         "saved_at": str(payload.get("saved_at", "")),
     }
     return underlyings, metadata
+
+
+def request_hard_stop(path: Path, *, underlying: str, requested_at: datetime) -> None:
+    pending = load_hard_stop_requests(path)
+    pending[underlying] = requested_at.isoformat()
+    _atomic_write_json(path, {"schema_version": STATE_SCHEMA_VERSION, "pending": pending})
+
+
+def load_hard_stop_requests(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if payload.get("schema_version") != STATE_SCHEMA_VERSION:
+        return {}
+    pending = payload.get("pending")
+    if not isinstance(pending, dict):
+        return {}
+    return {
+        str(name): str(requested_at)
+        for name, requested_at in pending.items()
+        if str(name).strip()
+    }
+
+
+def acknowledge_hard_stop_requests(path: Path, underlyings: set[str]) -> None:
+    pending = load_hard_stop_requests(path)
+    remaining = {name: requested_at for name, requested_at in pending.items() if name not in underlyings}
+    _atomic_write_json(path, {"schema_version": STATE_SCHEMA_VERSION, "pending": remaining})
