@@ -998,14 +998,22 @@ def _best_depth_price(quote: dict[str, Any], side: str) -> float:
     return _to_float(rows[0].get("price"), 0.0)
 
 
+def _json_safe_timestamp(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 def _apply_open_trade_quote(
     open_trade: dict[str, Any],
     instrument: str,
     quote: dict[str, Any],
 ) -> float:
     ltp = _quote_ltp(instrument, quote)
-    open_trade["quote_timestamp"] = quote.get("timestamp")
-    open_trade["last_trade_time"] = quote.get("last_trade_time")
+    open_trade["quote_timestamp"] = _json_safe_timestamp(quote.get("timestamp"))
+    open_trade["last_trade_time"] = _json_safe_timestamp(quote.get("last_trade_time"))
     open_trade["best_bid"] = _best_depth_price(quote, "buy")
     open_trade["best_ask"] = _best_depth_price(quote, "sell")
     return ltp

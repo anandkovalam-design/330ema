@@ -1,5 +1,7 @@
+import json
+
 import pandas as pd
-from datetime import datetime, time as wall_time, timedelta
+from datetime import datetime, time as wall_time, timedelta, timezone
 from types import SimpleNamespace
 
 from aadithya_quantlab.zerodha_live_trading import main
@@ -297,10 +299,13 @@ def test_commodity_live_signal_quote_failure_keeps_engine_running(monkeypatch) -
 
 def test_open_trade_full_quote_exposes_depth_and_last_trade_time() -> None:
     trade: dict = {}
+    ist = timezone(timedelta(hours=5, minutes=30))
+    quote_time = datetime(2026, 8, 19, 19, 20, 5, tzinfo=ist)
+    last_trade_time = datetime(2026, 8, 19, 18, 47, 12, tzinfo=ist)
     quote = {
         "last_price": 4618.0,
-        "timestamp": "2026-08-19T19:20:05+05:30",
-        "last_trade_time": "2026-08-19T18:47:12+05:30",
+        "timestamp": quote_time,
+        "last_trade_time": last_trade_time,
         "depth": {
             "buy": [{"price": 4575.0, "quantity": 1}],
             "sell": [{"price": 4680.0, "quantity": 1}],
@@ -310,7 +315,9 @@ def test_open_trade_full_quote_exposes_depth_and_last_trade_time() -> None:
     assert _apply_open_trade_quote(trade, "MCX:SILVER26AUG229000CE", quote) == 4618.0
     assert trade["best_bid"] == 4575.0
     assert trade["best_ask"] == 4680.0
-    assert trade["last_trade_time"] == "2026-08-19T18:47:12+05:30"
+    assert trade["quote_timestamp"] == quote_time.isoformat()
+    assert trade["last_trade_time"] == last_trade_time.isoformat()
+    json.dumps(trade)
 
 
 def test_live_quotes_are_collected_for_one_batch_request() -> None:
