@@ -20,6 +20,8 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _clear_login_credentials,
     _default_state_for,
     _apply_pending_hard_stops,
+    _apply_open_trade_quote,
+    _collect_live_quote_instruments,
     _enforce_universal_trail_start,
     _entries_blocked_for_expiry_day,
     _front_future_row,
@@ -291,6 +293,48 @@ def test_commodity_live_signal_quote_failure_keeps_engine_running(monkeypatch) -
 
     assert engine["live_signal_ltp"] == 7000.0
     assert engine["live_signal_error"] == "RuntimeError: quote unavailable"
+
+
+def test_open_trade_full_quote_exposes_depth_and_last_trade_time() -> None:
+    trade: dict = {}
+    quote = {
+        "last_price": 4618.0,
+        "timestamp": "2026-08-19T19:20:05+05:30",
+        "last_trade_time": "2026-08-19T18:47:12+05:30",
+        "depth": {
+            "buy": [{"price": 4575.0, "quantity": 1}],
+            "sell": [{"price": 4680.0, "quantity": 1}],
+        },
+    }
+
+    assert _apply_open_trade_quote(trade, "MCX:SILVER26AUG229000CE", quote) == 4618.0
+    assert trade["best_bid"] == 4575.0
+    assert trade["best_ask"] == 4680.0
+    assert trade["last_trade_time"] == "2026-08-19T18:47:12+05:30"
+
+
+def test_live_quotes_are_collected_for_one_batch_request() -> None:
+    expiry = (pd.Timestamp.now(tz="Asia/Kolkata") + timedelta(days=10)).date()
+    rows = [
+        {
+            "name": name,
+            "tradingsymbol": f"{name}26SEPFUT",
+            "instrument_type": "FUT",
+            "expiry": expiry,
+            "instrument_token": index,
+        }
+        for index, name in enumerate(("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"), 1)
+    ]
+    state = {name: _default_state_for(config) for name, config in UNDERLYINGS.items()}
+    state["SILVER"]["open_trade"] = {"instrument": "MCX:SILVER26AUG229000CE"}
+
+    instruments = _collect_live_quote_instruments(state, rows, 0)
+
+    assert "NSE:NIFTY 50" in instruments
+    assert "BSE:SENSEX" in instruments
+    assert "MCX:SILVER26SEPFUT" in instruments
+    assert "MCX:SILVER26AUG229000CE" in instruments
+    assert len(instruments) == 7
 
 
 def test_all_mcx_commodities_treat_live_lot_size_one_as_one_contract_lot() -> None:

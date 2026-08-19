@@ -138,6 +138,10 @@ UNDERLYINGS: dict[str, UnderlyingConfig] = {
 
 INDEX_NAMES = ("NIFTY", "SENSEX")
 COMMODITY_NAMES = ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER")
+INDEX_QUOTE_INSTRUMENTS = {
+    "NIFTY": "NSE:NIFTY 50",
+    "SENSEX": "BSE:SENSEX",
+}
 
 # MCX exposes broker order quantity as contracts (normally lot_size=1), while
 # each standard contract represents the physical quantity below.  Keep these
@@ -979,18 +983,75 @@ def _extract_ltp(kite: KiteConnect, instrument: str) -> float:
     return ltp
 
 
+def _quote_ltp(instrument: str, quote: dict[str, Any]) -> float:
+    ltp = _to_float(quote.get("last_price"), 0.0)
+    if ltp <= 0:
+        raise ValueError(f"Invalid LTP for {instrument}")
+    return ltp
+
+
+def _best_depth_price(quote: dict[str, Any], side: str) -> float:
+    depth = quote.get("depth")
+    rows = depth.get(side, []) if isinstance(depth, dict) else []
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+        return 0.0
+    return _to_float(rows[0].get("price"), 0.0)
+
+
+def _apply_open_trade_quote(
+    open_trade: dict[str, Any],
+    instrument: str,
+    quote: dict[str, Any],
+) -> float:
+    ltp = _quote_ltp(instrument, quote)
+    open_trade["quote_timestamp"] = quote.get("timestamp")
+    open_trade["last_trade_time"] = quote.get("last_trade_time")
+    open_trade["best_bid"] = _best_depth_price(quote, "buy")
+    open_trade["best_ask"] = _best_depth_price(quote, "sell")
+    return ltp
+
+
+def _collect_live_quote_instruments(
+    engine_state: dict[str, dict[str, Any]],
+    mcx_rows: list[dict[str, Any]],
+    commodity_expiry_offset: int,
+) -> list[str]:
+    instruments = set(INDEX_QUOTE_INSTRUMENTS.values())
+    for name in COMMODITY_NAMES:
+        future = _front_future_row(
+            UNDERLYINGS[name],
+            mcx_rows,
+            expiry_offset=commodity_expiry_offset,
+        )
+        instruments.add(f"MCX:{future['tradingsymbol']}")
+    for state in engine_state.values():
+        for key in ("open_trade", "ha_open_trade"):
+            trade = state.get(key)
+            if isinstance(trade, dict) and str(trade.get("instrument", "")).strip():
+                instruments.add(str(trade["instrument"]).strip())
+    return sorted(instruments)
+
+
 def _refresh_live_signal_quote(
     kite: KiteConnect,
     cfg: UnderlyingConfig,
     engine: dict[str, Any],
+    quote_snapshot: dict[str, dict[str, Any]] | None = None,
 ) -> None:
-    if cfg.name not in COMMODITY_NAMES:
-        return
-    signal_symbol = str(engine.get("signal_symbol", "")).strip()
-    if not signal_symbol:
+    if cfg.name in INDEX_QUOTE_INSTRUMENTS:
+        instrument = INDEX_QUOTE_INSTRUMENTS[cfg.name]
+    else:
+        signal_symbol = str(engine.get("signal_symbol", "")).strip()
+        instrument = f"MCX:{signal_symbol}" if signal_symbol else ""
+    if not instrument:
         return
     try:
-        engine["live_signal_ltp"] = _extract_ltp(kite, f"MCX:{signal_symbol}")
+        quote = (quote_snapshot or {}).get(instrument)
+        engine["live_signal_ltp"] = (
+            _quote_ltp(instrument, quote)
+            if isinstance(quote, dict)
+            else _extract_ltp(kite, instrument)
+        )
         engine["live_signal_time"] = datetime.now(IST)
         engine["live_signal_error"] = ""
     except Exception as error:
@@ -1392,6 +1453,7 @@ def _run_engine_for(
     real_mode_armed: bool,
     instrument_rows: list[dict[str, Any]] | None = None,
     market_bars: pd.DataFrame | None = None,
+    quote_snapshot: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now_ist = datetime.now(IST)
 
@@ -1428,11 +1490,17 @@ def _run_engine_for(
     engine["latest_time"] = latest_time
     if "signal_symbol" in display_bars.columns:
         engine["signal_symbol"] = str(display_bars.iloc[-1]["signal_symbol"])
-    _refresh_live_signal_quote(kite, cfg, engine)
+    _refresh_live_signal_quote(kite, cfg, engine, quote_snapshot)
 
     open_trade = engine.get("open_trade")
     if isinstance(open_trade, dict) and open_trade:
-        ltp = _extract_ltp(kite, str(open_trade["instrument"]))
+        instrument = str(open_trade["instrument"])
+        quote = (quote_snapshot or {}).get(instrument)
+        ltp = (
+            _apply_open_trade_quote(open_trade, instrument, quote)
+            if isinstance(quote, dict)
+            else _extract_ltp(kite, instrument)
+        )
         qty = int(open_trade["quantity"])
         pnl_qty = _trade_pnl_quantity(cfg, open_trade)
         entry = _to_float(open_trade["entry_option"], 0.0)
@@ -1744,6 +1812,7 @@ def _run_parallel_index_engines(
     expiry_week_offset: int,
     trade_mode: str,
     real_mode_armed: bool,
+    quote_snapshot: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run EMA in the selected mode and HA independently in PAPER mode."""
 
@@ -1775,6 +1844,7 @@ def _run_parallel_index_engines(
         trade_mode=trade_mode,
         real_mode_armed=real_mode_armed,
         market_bars=shared_market_bars,
+        quote_snapshot=quote_snapshot,
     )
     ha_state = _parallel_heikin_ashi_state(
         engine,
@@ -1792,6 +1862,7 @@ def _run_parallel_index_engines(
         trade_mode="PAPER",
         real_mode_armed=False,
         market_bars=shared_market_bars,
+        quote_snapshot=quote_snapshot,
     )
     _merge_parallel_heikin_ashi_state(engine, ha_state)
     return engine
@@ -1841,6 +1912,15 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
             else:
                 st.write(f"Quantity: {trade_quantity}")
             st.write(f"LTP: {_to_float(open_trade.get('ltp')):.2f}")
+            st.write(
+                f"Best bid / ask: {_to_float(open_trade.get('best_bid')):.2f} / "
+                f"{_to_float(open_trade.get('best_ask')):.2f}"
+            )
+            if open_trade.get("last_trade_time"):
+                st.caption(
+                    f"Last trade {_format_ist_timestamp(open_trade.get('last_trade_time'))} · "
+                    f"quote {_format_ist_timestamp(open_trade.get('quote_timestamp'))}"
+                )
             st.write(f"uPnL: {_to_float(open_trade.get('unrealized')):.2f}")
             stop = _to_float(open_trade.get("stop_price"))
             dist = _to_float(open_trade.get("sl_distance"))
@@ -1975,6 +2055,12 @@ def _render_live_engine(
                 kite = _get_kite(st.session_state.api_key, st.session_state.access_token)
                 _ = kite.profile()
                 mcx_rows = _cached_exchange_instruments(kite, "MCX")
+                quote_instruments = _collect_live_quote_instruments(
+                    st.session_state.engine_state,
+                    mcx_rows,
+                    commodity_expiry_offset,
+                )
+                quote_snapshot = kite.quote(*quote_instruments)
                 pending_hard_stops = _apply_pending_hard_stops(st.session_state.engine_state)
                 for name, cfg in UNDERLYINGS.items():
                     state = st.session_state.engine_state[name]
@@ -1992,6 +2078,7 @@ def _render_live_engine(
                             expiry_week_offset=contract_expiry_offset,
                             trade_mode=trade_mode,
                             real_mode_armed=real_mode_armed,
+                            quote_snapshot=quote_snapshot,
                         )
                     else:
                         state["strategy_mode"] = STRATEGY_EMA
@@ -2006,6 +2093,7 @@ def _render_live_engine(
                             trade_mode=trade_mode,
                             real_mode_armed=real_mode_armed,
                             instrument_rows=mcx_rows,
+                            quote_snapshot=quote_snapshot,
                         )
                     st.session_state.engine_state[name] = state
                 completed_hard_stops = {
