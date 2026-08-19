@@ -979,6 +979,24 @@ def _extract_ltp(kite: KiteConnect, instrument: str) -> float:
     return ltp
 
 
+def _refresh_live_signal_quote(
+    kite: KiteConnect,
+    cfg: UnderlyingConfig,
+    engine: dict[str, Any],
+) -> None:
+    if cfg.name not in COMMODITY_NAMES:
+        return
+    signal_symbol = str(engine.get("signal_symbol", "")).strip()
+    if not signal_symbol:
+        return
+    try:
+        engine["live_signal_ltp"] = _extract_ltp(kite, f"MCX:{signal_symbol}")
+        engine["live_signal_time"] = datetime.now(IST)
+        engine["live_signal_error"] = ""
+    except Exception as error:
+        engine["live_signal_error"] = f"{type(error).__name__}: {error}"
+
+
 def _split_instrument(instrument: str) -> tuple[str, str]:
     exchange, symbol = instrument.split(":", 1)
     return exchange, symbol
@@ -1410,6 +1428,7 @@ def _run_engine_for(
     engine["latest_time"] = latest_time
     if "signal_symbol" in display_bars.columns:
         engine["signal_symbol"] = str(display_bars.iloc[-1]["signal_symbol"])
+    _refresh_live_signal_quote(kite, cfg, engine)
 
     open_trade = engine.get("open_trade")
     if isinstance(open_trade, dict) and open_trade:
@@ -1877,6 +1896,22 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
         if isinstance(bars, pd.DataFrame) and not bars.empty:
             session_date = pd.Timestamp(bars["timestamp"].iloc[-1]).strftime("%d %b %Y")
             latest = bars.iloc[-1]
+            if name in COMMODITY_NAMES:
+                quote_left, quote_right = st.columns(2)
+                with quote_left:
+                    st.metric(
+                        "Live futures LTP",
+                        f"{_to_float(engine.get('live_signal_ltp')):.2f}",
+                    )
+                    live_signal_time = engine.get("live_signal_time")
+                    if live_signal_time:
+                        st.caption(f"Quote updated {_format_ist_timestamp(live_signal_time)}")
+                with quote_right:
+                    st.metric("Last 5-minute candle", f"{_to_float(latest.get('close')):.2f}")
+                    st.caption(f"Candle time {_format_ist_timestamp(latest.get('timestamp'))}")
+                live_signal_error = str(engine.get("live_signal_error", "")).strip()
+                if live_signal_error:
+                    st.warning(f"Live futures quote unavailable: {live_signal_error}")
             st.caption(f"{session_date} candlesticks | EMA 3 yellow | EMA 30 blue")
             st.altair_chart(_build_price_chart(bars, name), width="stretch")
             ema_fast = _to_float(latest.get("ema_fast"), 0.0)

@@ -37,6 +37,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     MCX_CONTRACT_SPECS,
     _run_parallel_index_engines,
     _request_hard_stop_from_controls,
+    _refresh_live_signal_quote,
     _reset_durable_paper_trade_state,
     _sync_scaled_metal_risk_settings,
     _run_engine_for,
@@ -258,6 +259,38 @@ def test_mcx_front_future_and_atm_option_are_resolved_dynamically() -> None:
         object(), cfg, "CALL", 6170.0, expiry_week_offset=1, instrument_rows=rows
     )
     assert next_instrument == "MCX:CRUDEOIL6200NEXTCE"
+
+
+def test_commodity_live_signal_quote_refreshes_from_front_future(monkeypatch) -> None:
+    requested: list[str] = []
+    engine = {"signal_symbol": "SILVER26SEPFUT"}
+
+    def fake_extract_ltp(kite, instrument: str) -> float:
+        requested.append(instrument)
+        return 234567.0
+
+    monkeypatch.setattr(app, "_extract_ltp", fake_extract_ltp)
+
+    _refresh_live_signal_quote(object(), UNDERLYINGS["SILVER"], engine)
+
+    assert requested == ["MCX:SILVER26SEPFUT"]
+    assert engine["live_signal_ltp"] == 234567.0
+    assert engine["live_signal_error"] == ""
+    assert engine["live_signal_time"] is not None
+
+
+def test_commodity_live_signal_quote_failure_keeps_engine_running(monkeypatch) -> None:
+    engine = {"signal_symbol": "CRUDEOIL26SEPFUT", "live_signal_ltp": 7000.0}
+    monkeypatch.setattr(
+        app,
+        "_extract_ltp",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("quote unavailable")),
+    )
+
+    _refresh_live_signal_quote(object(), UNDERLYINGS["CRUDEOIL"], engine)
+
+    assert engine["live_signal_ltp"] == 7000.0
+    assert engine["live_signal_error"] == "RuntimeError: quote unavailable"
 
 
 def test_all_mcx_commodities_treat_live_lot_size_one_as_one_contract_lot() -> None:
