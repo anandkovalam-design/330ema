@@ -2046,6 +2046,7 @@ def _render_live_engine(
     real_mode_armed: bool,
     expiry_week_offset: int,
     commodity_expiry_offset: int,
+    visible_names: tuple[str, ...],
 ) -> None:
     token = st.session_state.get("dashboard_session_token")
     if not _authentication().validate_session(token, touch=True):
@@ -2117,12 +2118,14 @@ def _render_live_engine(
                 total_realized = sum(
                     _to_float(state.get("realized_pnl"), 0.0)
                     + _to_float(state.get("ha_realized_pnl"), 0.0)
-                    for state in st.session_state.engine_state.values()
+                    for name, state in st.session_state.engine_state.items()
+                    if name in visible_names
                 )
                 total_unrealized = sum(
                     _to_float((state.get("open_trade") or {}).get("unrealized"), 0.0)
                     + _to_float((state.get("ha_open_trade") or {}).get("unrealized"), 0.0)
-                    for state in st.session_state.engine_state.values()
+                    for name, state in st.session_state.engine_state.items()
+                    if name in visible_names
                 )
 
                 m1, m2, m3 = st.columns(3)
@@ -2133,7 +2136,7 @@ def _render_live_engine(
                 with m3:
                     st.metric("Grand Total P&L", f"{(total_realized + total_unrealized):.2f}")
 
-                names = list(UNDERLYINGS)
+                names = list(visible_names)
                 for start in range(0, len(names), 2):
                     columns = st.columns(2)
                     for column, name in zip(columns, names[start : start + 2]):
@@ -2566,8 +2569,16 @@ def _render_security_page(session: dict[str, object]) -> None:
 def _navigation_pages_for_role(role: str) -> list[str]:
     monitoring_pages = ["Positions", "Trade history", "Index P&L", "Commodity P&L"]
     if role.upper() == "OWNER":
-        return ["Live dashboard", "Trade controls", *monitoring_pages, "Security", "Settings"]
+        return ["Index live", "Commodity live", "Trade controls", *monitoring_pages, "Security", "Settings"]
     return monitoring_pages
+
+
+def _live_underlyings_for_page(page: str) -> tuple[str, ...]:
+    return INDEX_NAMES if page == "Index live" else COMMODITY_NAMES
+
+
+def _default_live_page(now_ist: datetime) -> str:
+    return "Commodity live" if now_ist.time() >= wall_time(15, 30) else "Index live"
 
 
 def _render_settings_page(session: dict[str, object]) -> None:
@@ -2609,6 +2620,8 @@ def main() -> None:
     with st.sidebar:
         display_role = "VIEWER" if role == "USER" else role
         st.caption(f"Signed in as {session['username']} · {display_role}")
+        if role == "OWNER" and st.session_state.get("dashboard_navigation") not in pages:
+            st.session_state.dashboard_navigation = _default_live_page(datetime.now(IST))
         selected_page = st.radio("Navigation", pages, key="dashboard_navigation")
         if st.button("Log out", icon=":material/logout:", width="stretch"):
             _authentication().logout(str(st.session_state.dashboard_session_token), _client_context())
@@ -2635,11 +2648,18 @@ def main() -> None:
         _render_settings_page(session)
         return
 
-    if selected_page == "Live dashboard":
-        st.markdown("## :material/candlestick_chart: Live dashboard")
+    if selected_page in ("Index live", "Commodity live"):
+        is_index_live = selected_page == "Index live"
+        visible_names = _live_underlyings_for_page(selected_page)
+        page_title = "Index live" if is_index_live else "Commodity live"
+        st.markdown(f"## :material/candlestick_chart: {page_title}")
         live_left, live_right = st.columns([2.2, 1.2])
         with live_left:
-            st.caption("Live charts, signals, positions, and execution events.")
+            st.caption(
+                "NIFTY and SENSEX live charts, positions, and execution events."
+                if is_index_live
+                else "MCX commodity live charts, positions, and execution events."
+            )
         with live_right:
             now_str = datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST")
             st.caption(f":material/schedule: {now_str}")
@@ -2660,8 +2680,9 @@ def main() -> None:
             and not reconciliation_required
         )
         st.caption(
-            f"Execution: {trade_mode} · index expiry: {expiry_mode} · "
-            f"commodity expiry: {commodity_expiry_mode}. Change these on Trade controls."
+            f"Execution: {trade_mode} · "
+            + (f"index expiry: {expiry_mode}. " if is_index_live else f"commodity expiry: {commodity_expiry_mode}. ")
+            + "Change this on Trade controls."
         )
         _persist_engine_state(st.session_state.engine_state)
         _render_live_engine(
@@ -2669,6 +2690,7 @@ def main() -> None:
             effective_real_mode_armed,
             expiry_week_offset,
             commodity_expiry_offset,
+            visible_names,
         )
         return
 

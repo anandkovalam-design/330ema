@@ -13,7 +13,13 @@ from aadithya_quantlab.zerodha_live_trading.auth import (
     resolve_client_context,
     verify_password,
 )
-from aadithya_quantlab.zerodha_live_trading.app import _navigation_pages_for_role
+from aadithya_quantlab.zerodha_live_trading.app import (
+    COMMODITY_NAMES,
+    INDEX_NAMES,
+    _default_live_page,
+    _live_underlyings_for_page,
+    _navigation_pages_for_role,
+)
 from aadithya_quantlab.zerodha_live_trading.database import Database
 from aadithya_quantlab.zerodha_live_trading.pnl import PnlThresholds, classify_pnl, monthly_summary
 
@@ -141,6 +147,9 @@ def test_owner_can_create_and_disable_viewer(
         "Positions", "Trade history", "Index P&L", "Commodity P&L"
     ]
     assert "Trade controls" in _navigation_pages_for_role("OWNER")
+    assert "Index live" in _navigation_pages_for_role("OWNER")
+    assert "Commodity live" in _navigation_pages_for_role("OWNER")
+    assert "Live dashboard" not in _navigation_pages_for_role("OWNER")
     assert "Security" in _navigation_pages_for_role("OWNER")
 
     revoked = service.set_viewer_active(owner_session, viewer_id, False)
@@ -154,6 +163,13 @@ def test_owner_can_create_and_disable_viewer(
         "VIEWER_DISABLED",
         "VIEWER_ENABLED",
     }
+
+
+def test_live_pages_split_index_and_commodity_views_after_market_close() -> None:
+    assert _live_underlyings_for_page("Index live") == INDEX_NAMES
+    assert _live_underlyings_for_page("Commodity live") == COMMODITY_NAMES
+    assert _default_live_page(datetime(2026, 8, 19, 15, 29)) == "Index live"
+    assert _default_live_page(datetime(2026, 8, 19, 15, 30)) == "Commodity live"
 
 
 def test_non_owner_cannot_create_or_enable_viewers(
