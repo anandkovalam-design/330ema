@@ -2577,10 +2577,6 @@ def _live_underlyings_for_page(page: str) -> tuple[str, ...]:
     return INDEX_NAMES if page == "Index live" else COMMODITY_NAMES
 
 
-def _default_live_page(now_ist: datetime) -> str:
-    return "Commodity live" if now_ist.time() >= wall_time(15, 30) else "Index live"
-
-
 def _render_settings_page(session: dict[str, object]) -> None:
     _authentication().require_owner(session)
     st.markdown("## :material/settings: Owner settings")
@@ -2621,7 +2617,7 @@ def main() -> None:
         display_role = "VIEWER" if role == "USER" else role
         st.caption(f"Signed in as {session['username']} · {display_role}")
         if role == "OWNER" and st.session_state.get("dashboard_navigation") not in pages:
-            st.session_state.dashboard_navigation = _default_live_page(datetime.now(IST))
+            st.session_state.dashboard_navigation = "Index live"
         selected_page = st.radio("Navigation", pages, key="dashboard_navigation")
         if st.button("Log out", icon=":material/logout:", width="stretch"):
             _authentication().logout(str(st.session_state.dashboard_session_token), _client_context())
