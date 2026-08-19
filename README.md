@@ -255,10 +255,20 @@ only then run:
 az containerapp ingress update --name $ContainerApp --resource-group $ResourceGroup --type external --target-port 8501
 ```
 
-Set the Zerodha app redirect URL to the authenticated Container App URL. Each
-trading day, use the dashboard's Zerodha login flow and paste the short-lived
-request token. The resulting access token is written with restricted file
-permissions to the mounted share and is accepted only for the current IST date.
+Set the Kite Connect app redirect URL to the deployed dashboard URL. For the
+Railway service in this repository, use:
+
+```text
+https://balanced-stillness-production-1969.up.railway.app/
+```
+
+Each trading day, click **Authenticate with Zerodha**, complete the normal
+Zerodha password and 2FA screen, and Zerodha redirects back to the dashboard.
+The dashboard exchanges the short-lived request token automatically, removes it
+from the browser URL, and stores the resulting access token with restricted file
+permissions for the current IST date. External Authenticator TOTP is convenient
+for this flow, but its secret must remain in the authenticator app and must not
+be stored in Railway or this repository.
 
 ### Restart and recovery behavior
 

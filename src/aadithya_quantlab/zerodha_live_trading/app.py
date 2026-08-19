@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import calendar
+import html
 from dataclasses import dataclass
 from datetime import date, datetime, time as wall_time, timedelta
 from typing import Any
@@ -539,6 +540,66 @@ def _get_kite(api_key: str, access_token: str) -> KiteConnect:
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
     return kite
+
+
+def _exchange_zerodha_request_token(
+    api_key: str,
+    api_secret: str,
+    request_token: str,
+) -> tuple[str, dict[str, Any]]:
+    kite = KiteConnect(api_key=api_key)
+    session_data = kite.generate_session(request_token, api_secret=api_secret)
+    access_token = str(session_data.get("access_token", "")).strip()
+    if not access_token:
+        raise ValueError("No access token returned from Zerodha session response.")
+    profile = dict(_get_kite(api_key, access_token).profile())
+    return access_token, profile
+
+
+def _complete_zerodha_login_callback() -> bool:
+    request_token = str(st.query_params.get("request_token", "")).strip()
+    if not request_token:
+        return False
+
+    try:
+        credentials = _load_login_credentials()
+        if not credentials:
+            raise RuntimeError("Configure the Zerodha API key and API secret before authenticating.")
+        access_token, profile = _exchange_zerodha_request_token(
+            credentials["api_key"],
+            credentials["api_secret"],
+            request_token,
+        )
+        st.session_state["connected"] = True
+        st.session_state["api_key"] = credentials["api_key"]
+        st.session_state["access_token"] = access_token
+        st.session_state["connection_restored"] = False
+        st.session_state["zerodha_login_notice"] = (
+            f"Zerodha authentication successful: {profile.get('user_id', '')}"
+        )
+        _save_connection_for_today(credentials["api_key"], access_token)
+        return True
+    except Exception as error:
+        st.session_state["connected"] = False
+        st.session_state["zerodha_login_notice"] = (
+            f"Zerodha authentication failed: {type(error).__name__}: {error}"
+        )
+        return False
+    finally:
+        st.query_params.clear()
+
+
+def _render_same_tab_zerodha_login(url: str) -> None:
+    safe_url = html.escape(url, quote=True)
+    st.html(
+        f"""
+        <a href="{safe_url}" target="_self" style="
+            align-items:center;background:#16883f;border:1px solid #29b35a;
+            border-radius:6px;color:#ffffff;display:flex;font-weight:700;
+            justify-content:center;min-height:42px;text-decoration:none;width:100%;
+        ">Authenticate with Zerodha</a>
+        """
+    )
 
 
 def _cached_exchange_instruments(kite: KiteConnect, exchange: str) -> list[dict[str, Any]]:
@@ -1972,6 +2033,8 @@ def _init_session_state() -> None:
         st.session_state.login_api_secret = ""
     if "credential_warning" not in st.session_state:
         st.session_state.credential_warning = ""
+    if "zerodha_login_notice" not in st.session_state:
+        st.session_state.zerodha_login_notice = ""
     if "engine_state" not in st.session_state:
         st.session_state.engine_state, recovery_metadata = _restore_persistent_engine_state()
         for name, settings in _load_risk_settings().items():
@@ -2408,6 +2471,7 @@ def main() -> None:
     _apply_visual_style()
     session = _require_dashboard_login()
     _init_session_state()
+    _complete_zerodha_login_callback()
 
     role = str(session.get("role", "")).upper()
     pages = _navigation_pages_for_role(role)
@@ -2499,6 +2563,12 @@ def main() -> None:
 
     with st.container(border=True):
         st.subheader(":material/vpn_key: API login and connection")
+        login_notice = str(st.session_state.pop("zerodha_login_notice", ""))
+        if login_notice:
+            if st.session_state.connected:
+                st.success(login_notice)
+            else:
+                st.error(login_notice)
         if st.session_state.connected:
             c1, c2 = st.columns([2.2, 1.0])
             with c1:
@@ -2523,87 +2593,49 @@ def main() -> None:
                 st.warning(str(error))
 
             if saved_credentials:
-                saved_left, saved_middle, saved_right = st.columns([2.0, 1.0, 1.0])
-                saved_left.info(
-                    f"Configured credentials available: API key {_credential_preview(saved_credentials['api_key'])}; API secret hidden."
+                st.info(
+                    f"API credentials configured: {_credential_preview(saved_credentials['api_key'])}."
                 )
-                if saved_middle.button("Use saved API credentials", width="stretch"):
-                    st.session_state.login_api_key = saved_credentials["api_key"]
-                    st.session_state.login_api_secret = saved_credentials["api_secret"]
-                    st.session_state.api_key = saved_credentials["api_key"]
-                    st.rerun()
-                if saved_right.button(
-                    "Forget saved credentials",
-                    width="stretch",
+                _render_same_tab_zerodha_login(
+                    build_kite_login_url(saved_credentials["api_key"])
+                )
+                st.caption(
+                    "Complete Zerodha login and 2FA. You will return here already connected."
+                )
+
+            with st.expander("Manual authentication fallback", expanded=not bool(saved_credentials)):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    api_key = st.text_input("API Key", type="password", key="login_api_key")
+                with c2:
+                    api_secret = st.text_input("API Secret", type="password", key="login_api_secret")
+                with c3:
+                    request_token = st.text_input("Request Token", value="", type="password")
+
+                remember_credentials = st.checkbox(
+                    "Remember API key and API secret securely on this computer",
+                    value=not _is_cloud_runtime(),
                     disabled=_is_cloud_runtime(),
-                    help="Cloud secrets are managed in Azure." if _is_cloud_runtime() else None,
-                ):
-                    try:
-                        _clear_login_credentials()
-                        st.session_state.login_api_key = ""
-                        st.session_state.login_api_secret = ""
-                        st.success("Saved API credentials removed.")
-                        st.rerun()
-                    except RuntimeError as error:
-                        st.error(str(error))
-
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                api_key = st.text_input("API Key", type="password", key="login_api_key")
-            with c2:
-                api_secret = st.text_input("API Secret", type="password", key="login_api_secret")
-            with c3:
-                request_token = st.text_input("Request Token", value="", type="password")
-
-            remember_credentials = st.checkbox(
-                "Remember API key and API secret securely on this computer",
-                value=not _is_cloud_runtime(),
-                disabled=_is_cloud_runtime(),
-                help=(
-                    "Cloud credentials come from secret-backed environment variables."
-                    if _is_cloud_runtime()
-                    else "Stores them in Windows Credential Manager, not in the project files."
-                ),
-            )
-
-            b1, b2 = st.columns(2)
-            with b1:
-                if st.button("Generate Login Link", width="stretch"):
-                    if not api_key.strip():
-                        st.error("Paste API key first.")
-                    else:
-                        st.session_state.login_url = build_kite_login_url(api_key.strip())
-                        st.session_state.api_key = api_key.strip()
-            with b2:
-                if st.button("Connect", width="stretch"):
+                )
+                if st.button("Connect manually", width="stretch"):
                     try:
                         if not api_key.strip() or not api_secret.strip() or not request_token.strip():
                             raise ValueError("API key, API secret, and request token are required.")
-                        kite = KiteConnect(api_key=api_key.strip())
-                        session_data = kite.generate_session(request_token.strip(), api_secret=api_secret.strip())
-                        access_token = str(session_data.get("access_token", "")).strip()
-                        if not access_token:
-                            raise ValueError("No access token returned from Zerodha session response.")
-                        check = _get_kite(api_key.strip(), access_token).profile()
+                        access_token, check = _exchange_zerodha_request_token(
+                            api_key.strip(), api_secret.strip(), request_token.strip()
+                        )
                         st.session_state.connected = True
                         st.session_state.api_key = api_key.strip()
                         st.session_state.access_token = access_token
                         _save_connection_for_today(api_key.strip(), access_token)
                         if remember_credentials:
-                            try:
-                                _save_login_credentials(api_key.strip(), api_secret.strip())
-                                st.session_state.credential_warning = ""
-                            except RuntimeError as credential_error:
-                                st.session_state.credential_warning = str(credential_error)
+                            _save_login_credentials(api_key.strip(), api_secret.strip())
                         st.session_state.connection_restored = False
                         st.success(f"Connection success: {check.get('user_id', '')}")
                         st.rerun()
                     except Exception as error:
                         st.session_state.connected = False
                         st.error(f"Connection failure: {type(error).__name__}: {error}")
-
-            if st.session_state.login_url:
-                st.link_button("Open Zerodha Login Page", st.session_state.login_url, width="stretch")
 
             st.info("Connection status: NOT CONNECTED")
 

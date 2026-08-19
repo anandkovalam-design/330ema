@@ -15,6 +15,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _completed_5m_bars,
     _compute_heikin_ashi,
     _compute_signals,
+    _complete_zerodha_login_callback,
     _credential_preview,
     _clear_login_credentials,
     _default_state_for,
@@ -770,6 +771,62 @@ def test_credentials_round_trip_through_keyring(monkeypatch) -> None:
     assert _credential_preview("api-key-value") == "api-...ue"
     _clear_login_credentials()
     assert _load_login_credentials() is None
+
+
+def test_zerodha_callback_exchanges_token_and_cleans_url(monkeypatch) -> None:
+    query_params = {"request_token": "fresh-request-token", "status": "success"}
+    session_state = {
+        "connected": False,
+        "api_key": "",
+        "access_token": "",
+        "connection_restored": False,
+        "zerodha_login_notice": "",
+    }
+    saved: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(query_params=query_params, session_state=session_state),
+    )
+    monkeypatch.setattr(
+        app,
+        "_load_login_credentials",
+        lambda: {"api_key": "configured-key", "api_secret": "configured-secret"},
+    )
+    monkeypatch.setattr(
+        app,
+        "_exchange_zerodha_request_token",
+        lambda api_key, api_secret, request_token: ("daily-access-token", {"user_id": "AB1234"}),
+    )
+    monkeypatch.setattr(
+        app,
+        "_save_connection_for_today",
+        lambda api_key, access_token: saved.append((api_key, access_token)),
+    )
+
+    assert _complete_zerodha_login_callback() is True
+    assert query_params == {}
+    assert session_state["connected"] is True
+    assert session_state["api_key"] == "configured-key"
+    assert session_state["access_token"] == "daily-access-token"
+    assert session_state["zerodha_login_notice"] == "Zerodha authentication successful: AB1234"
+    assert saved == [("configured-key", "daily-access-token")]
+
+
+def test_zerodha_callback_reports_failure_and_cleans_token(monkeypatch) -> None:
+    query_params = {"request_token": "invalid-request-token"}
+    session_state = {"connected": True, "zerodha_login_notice": ""}
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(query_params=query_params, session_state=session_state),
+    )
+    monkeypatch.setattr(app, "_load_login_credentials", lambda: None)
+
+    assert _complete_zerodha_login_callback() is False
+    assert query_params == {}
+    assert session_state["connected"] is False
+    assert session_state["zerodha_login_notice"].startswith("Zerodha authentication failed:")
 
 
 def test_risk_settings_persist_for_both_underlyings(monkeypatch, tmp_path) -> None:
