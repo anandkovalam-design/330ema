@@ -1,3 +1,4 @@
+import inspect
 import json
 
 import pandas as pd
@@ -342,6 +343,13 @@ def test_live_quotes_are_collected_for_one_batch_request() -> None:
     assert "MCX:SILVER26SEPFUT" in instruments
     assert "MCX:SILVER26AUG229000CE" in instruments
     assert len(instruments) == 7
+
+
+def test_live_engine_heartbeat_refreshes_dashboard_session() -> None:
+    source = inspect.getsource(app._render_live_engine)
+
+    assert "validate_session(token, touch=True)" in source
+    assert "validate_session(token, touch=False)" not in source
 
 
 def test_all_mcx_commodities_treat_live_lot_size_one_as_one_contract_lot() -> None:

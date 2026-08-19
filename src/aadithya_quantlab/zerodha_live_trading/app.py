@@ -2048,7 +2048,7 @@ def _render_live_engine(
     commodity_expiry_offset: int,
 ) -> None:
     token = st.session_state.get("dashboard_session_token")
-    if not _authentication().validate_session(token, touch=False):
+    if not _authentication().validate_session(token, touch=True):
         st.session_state.pop("dashboard_session_token", None)
         st.rerun(scope="app")
     with st.container(border=True):
@@ -2299,7 +2299,7 @@ def _require_dashboard_login() -> dict[str, object]:
             st.session_state.pop("dashboard_navigation", None)
             st.rerun()
         st.error("Sign-in failed or temporarily rate-limited.")
-    st.caption("Sessions expire after 30 minutes idle or 12 hours absolute time.")
+    st.caption("Sessions remain active while the live dashboard is open and expire after 12 hours maximum.")
     st.stop()
 
 
