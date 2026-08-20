@@ -57,6 +57,10 @@ HEIKIN_ASHI_PROFIT_GATE_POINTS = 10.0
 HEIKIN_ASHI_STOP_POINTS = 20.0
 DEFAULT_INDEX_EXPIRY_MODE = "Current week"
 DASHBOARD_HANDOFF_PARAM = "dashboard_handoff"
+MCX_LIQUIDITY_CANDIDATE_COUNT = 8
+MCX_MIN_LIQUIDITY_LOTS = 2
+MCX_MAX_SPREAD_PCT = 0.10
+MCX_MAX_LAST_TRADE_AGE = timedelta(minutes=15)
 
 
 @st.cache_resource
@@ -946,6 +950,100 @@ def _validate_option_contract_underlying(cfg: UnderlyingConfig, instrument: str)
         )
 
 
+def _select_liquid_mcx_option_contract(
+    kite: KiteConnect,
+    cfg: UnderlyingConfig,
+    side: str,
+    futures_price: float,
+    instrument_rows: list[dict[str, Any]],
+    expiry_offset: int = 0,
+) -> tuple[str, dict[str, Any]]:
+    option_type = "CE" if side == "CALL" else "PE"
+    session_date = datetime.now(IST).date()
+    rows: list[tuple[date, float, float, str, int]] = []
+    for row in instrument_rows:
+        if not _row_matches_underlying(row, cfg):
+            continue
+        if str(row.get("instrument_type", "")).upper() != option_type:
+            continue
+        expiry = pd.to_datetime(row.get("expiry"), errors="coerce")
+        strike = _to_float(row.get("strike"), 0.0)
+        lot_size = int(_to_float(row.get("lot_size"), 0.0))
+        if pd.isna(expiry) or expiry.date() < session_date or strike <= 0 or lot_size <= 0:
+            continue
+        symbol = str(row.get("tradingsymbol", "")).strip()
+        rows.append((expiry.date(), abs(strike - futures_price), strike, symbol, lot_size))
+
+    expiry_dates = sorted({row[0] for row in rows})
+    selected_offset = max(int(expiry_offset), 0)
+    if selected_offset >= len(expiry_dates):
+        raise ValueError(f"no eligible {cfg.name} {option_type} expiry is available")
+    selected_expiry = expiry_dates[selected_offset]
+    nearby = sorted(
+        (row for row in rows if row[0] == selected_expiry),
+        key=lambda row: (row[1], row[2]),
+    )[:MCX_LIQUIDITY_CANDIDATE_COUNT]
+    instruments = [f"{cfg.option_exchange}:{row[3]}" for row in nearby]
+    quotes = kite.quote(*instruments) if instruments else {}
+    now = pd.Timestamp(datetime.now(IST))
+    liquid: list[tuple[float, float, float, float, int, float, str, dict[str, Any]]] = []
+
+    for row, instrument in zip(nearby, instruments):
+        quote = quotes.get(instrument)
+        if not isinstance(quote, dict):
+            continue
+        bid = _best_depth_price(quote, "buy")
+        ask = _best_depth_price(quote, "sell")
+        ltp = _to_float(quote.get("last_price"), 0.0)
+        oi = int(_to_float(quote.get("oi"), 0.0))
+        volume = int(_to_float(quote.get("volume"), 0.0))
+        minimum_activity = MCX_MIN_LIQUIDITY_LOTS * row[4]
+        last_trade = pd.to_datetime(quote.get("last_trade_time"), errors="coerce")
+        if pd.isna(last_trade):
+            continue
+        if last_trade.tzinfo is None:
+            last_trade = last_trade.tz_localize(IST)
+        else:
+            last_trade = last_trade.tz_convert(IST)
+        age = now - last_trade
+        midpoint = (bid + ask) / 2.0
+        spread_pct = (ask - bid) / midpoint if midpoint > 0 else float("inf")
+        if (
+            age < pd.Timedelta(0)
+            or age > MCX_MAX_LAST_TRADE_AGE
+            or bid <= 0
+            or ask < bid
+            or ltp < bid
+            or ltp > ask
+            or oi < minimum_activity
+            or volume < minimum_activity
+            or spread_pct > MCX_MAX_SPREAD_PCT
+        ):
+            continue
+        strike = row[2]
+        is_itm = strike <= futures_price if side == "CALL" else strike >= futures_price
+        liquid.append(
+            (
+                spread_pct,
+                age.total_seconds(),
+                -float(oi),
+                -float(volume),
+                0 if is_itm else 1,
+                row[1],
+                instrument,
+                quote,
+            )
+        )
+
+    if not liquid:
+        raise ValueError(
+            f"no liquid nearby {cfg.name} {option_type} contract passed spread, OI, volume, and recency checks"
+        )
+    _, _, _, _, _, _, instrument, quote = sorted(liquid, key=lambda row: row[:6])[0]
+    _validate_option_contract_underlying(cfg, instrument)
+    return instrument, quote
+
+
 def _contract_lot_size(instrument: str, instrument_rows: list[dict[str, Any]]) -> int:
     _, symbol = _split_instrument(instrument)
     for row in instrument_rows:
@@ -1773,16 +1871,38 @@ def _run_engine_for(
         return engine
 
     spot_price = _to_float(sig["close"], 0.0)
-    instrument = _select_option_contract(
-        kite,
-        cfg,
-        side,
-        spot_price,
-        expiry_week_offset=expiry_week_offset,
-        instrument_rows=instrument_rows,
-    )
-    _validate_option_contract_underlying(cfg, instrument)
-    entry_option = _extract_ltp(kite, instrument)
+    selected_quote: dict[str, Any] | None = None
+    if cfg.name in ("GOLD", "SILVER"):
+        try:
+            instrument, selected_quote = _select_liquid_mcx_option_contract(
+                kite,
+                cfg,
+                side,
+                spot_price,
+                instrument_rows or [],
+                expiry_offset=expiry_week_offset,
+            )
+        except ValueError as error:
+            engine["last_signal_ts"] = signal_iso
+            engine["entry_status"] = f"Signal skipped: {error}"
+            _push_event(engine, f"{cfg.name} signal skipped: {error}")
+            return engine
+        entry_option = (
+            _best_depth_price(selected_quote, "sell")
+            if trade_mode == "PAPER" or use_heikin_ashi
+            else _to_float(selected_quote.get("last_price"), 0.0)
+        )
+    else:
+        instrument = _select_option_contract(
+            kite,
+            cfg,
+            side,
+            spot_price,
+            expiry_week_offset=expiry_week_offset,
+            instrument_rows=instrument_rows,
+        )
+        _validate_option_contract_underlying(cfg, instrument)
+        entry_option = _extract_ltp(kite, instrument)
     sl_points = (
         HEIKIN_ASHI_STOP_POINTS
         if use_heikin_ashi
@@ -1861,6 +1981,15 @@ def _run_engine_for(
         "trade_mode": "PAPER" if use_heikin_ashi else trade_mode,
         "strategy_mode": STRATEGY_HEIKIN_ASHI if use_heikin_ashi else STRATEGY_EMA,
     }
+    if selected_quote is not None:
+        engine["open_trade"].update(
+            {
+                "best_bid": _best_depth_price(selected_quote, "buy"),
+                "best_ask": _best_depth_price(selected_quote, "sell"),
+                "quote_timestamp": _json_safe_timestamp(selected_quote.get("timestamp")),
+                "last_trade_time": _json_safe_timestamp(selected_quote.get("last_trade_time")),
+            }
+        )
     if use_heikin_ashi:
         engine["open_trade"].update(
             {

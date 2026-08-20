@@ -48,6 +48,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _reset_durable_paper_trade_state,
     _sync_scaled_metal_risk_settings,
     _run_engine_for,
+    _select_liquid_mcx_option_contract,
     _select_option_contract,
     _validate_option_contract_underlying,
     _save_login_credentials,
@@ -307,6 +308,96 @@ def test_mixed_gold_silver_chain_selects_matching_underlying() -> None:
     )
 
     assert instrument == "MCX:GOLD26AUG125000CE"
+
+
+def test_liquid_mcx_selector_bypasses_stale_nearest_for_slightly_itm() -> None:
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    expiry = now.date() + timedelta(days=7)
+    rows = [
+        {
+            "name": "SILVER",
+            "tradingsymbol": "SILVER26SEP239000CE",
+            "instrument_type": "CE",
+            "expiry": expiry,
+            "strike": 239000,
+            "lot_size": 30,
+        },
+        {
+            "name": "SILVER",
+            "tradingsymbol": "SILVER26SEP238000CE",
+            "instrument_type": "CE",
+            "expiry": expiry,
+            "strike": 238000,
+            "lot_size": 30,
+        },
+    ]
+
+    class FakeKite:
+        def quote(self, *instruments):
+            assert set(instruments) == {
+                "MCX:SILVER26SEP239000CE",
+                "MCX:SILVER26SEP238000CE",
+            }
+            return {
+                "MCX:SILVER26SEP239000CE": {
+                    "last_price": 2027.5,
+                    "oi": 30,
+                    "volume": 30,
+                    "last_trade_time": now - timedelta(hours=1),
+                    "depth": {
+                        "buy": [{"price": 1500.0}],
+                        "sell": [{"price": 2500.0}],
+                    },
+                },
+                "MCX:SILVER26SEP238000CE": {
+                    "last_price": 2200.0,
+                    "oi": 300,
+                    "volume": 240,
+                    "last_trade_time": now - timedelta(minutes=2),
+                    "depth": {
+                        "buy": [{"price": 2180.0}],
+                        "sell": [{"price": 2220.0}],
+                    },
+                },
+            }
+
+    instrument, quote = _select_liquid_mcx_option_contract(
+        FakeKite(), UNDERLYINGS["SILVER"], "CALL", 239100.0, rows
+    )
+
+    assert instrument == "MCX:SILVER26SEP238000CE"
+    assert quote["depth"]["sell"][0]["price"] == 2220.0
+
+
+def test_liquid_mcx_selector_rejects_chain_without_two_sided_market() -> None:
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    rows = [
+        {
+            "name": "GOLD",
+            "tradingsymbol": "GOLD26SEP125000CE",
+            "instrument_type": "CE",
+            "expiry": now.date() + timedelta(days=7),
+            "strike": 125000,
+            "lot_size": 1,
+        }
+    ]
+
+    class FakeKite:
+        def quote(self, *instruments):
+            return {
+                instruments[0]: {
+                    "last_price": 100.0,
+                    "oi": 100,
+                    "volume": 100,
+                    "last_trade_time": now,
+                    "depth": {"buy": [], "sell": []},
+                }
+            }
+
+    with pytest.raises(ValueError, match="no liquid nearby GOLD CE contract"):
+        _select_liquid_mcx_option_contract(
+            FakeKite(), UNDERLYINGS["GOLD"], "CALL", 125100.0, rows
+        )
 
 
 def test_commodity_live_signal_quote_refreshes_from_front_future(monkeypatch) -> None:
