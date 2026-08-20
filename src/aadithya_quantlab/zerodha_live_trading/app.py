@@ -2164,12 +2164,37 @@ def _render_live_engine(
                 with m3:
                     st.metric("Grand Total P&L", f"{(total_realized + total_unrealized):.2f}")
 
-                names = list(visible_names)
-                for start in range(0, len(names), 2):
-                    columns = st.columns(2)
-                    for column, name in zip(columns, names[start : start + 2]):
-                        with column:
-                            _render_underlying_card(name, st.session_state.engine_state[name])
+                live_rows = []
+                for name in visible_names:
+                    state = st.session_state.engine_state[name]
+                    bars = state.get("latest_bars")
+                    latest_close = (
+                        _to_float(bars.iloc[-1].get("close"))
+                        if isinstance(bars, pd.DataFrame) and not bars.empty
+                        else 0.0
+                    )
+                    open_trade = state.get("open_trade") or state.get("ha_open_trade") or {}
+                    live_rows.append(
+                        {
+                            "Symbol": name,
+                            "Live LTP": _to_float(state.get("live_signal_ltp")),
+                            "Last 5m close": latest_close,
+                            "Position LTP": _to_float(open_trade.get("ltp")) if open_trade else None,
+                            "Unrealized P&L": _to_float(open_trade.get("unrealized")) if open_trade else None,
+                            "EMA status": str(state.get("entry_status", "Waiting")),
+                        }
+                    )
+                st.dataframe(
+                    pd.DataFrame(live_rows),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Live LTP": st.column_config.NumberColumn(format="%.2f"),
+                        "Last 5m close": st.column_config.NumberColumn(format="%.2f"),
+                        "Position LTP": st.column_config.NumberColumn(format="%.2f"),
+                        "Unrealized P&L": st.column_config.NumberColumn(format="%.2f"),
+                    },
+                )
             except Exception as error:
                 st.error(f"Live engine error: {type(error).__name__}: {error}")
         else:
@@ -2178,6 +2203,17 @@ def _render_live_engine(
         st.caption(
             f"Signal/data source: direct Zerodha market data. Durable recovery state: {TRADING_STATE_PATH}."
         )
+
+
+@st.fragment(run_every=60)
+def _render_live_detail_cards(visible_names: tuple[str, ...]) -> None:
+    st.caption(":material/candlestick_chart: Charts and detailed cards refresh once per minute.")
+    names = list(visible_names)
+    for start in range(0, len(names), 2):
+        columns = st.columns(2)
+        for column, name in zip(columns, names[start : start + 2]):
+            with column:
+                _render_underlying_card(name, st.session_state.engine_state[name])
 
 
 def _init_session_state() -> None:
@@ -2716,6 +2752,7 @@ def main() -> None:
             commodity_expiry_offset,
             visible_names,
         )
+        _render_live_detail_cards(visible_names)
         return
 
     st.markdown("## :material/tune: Trade controls")
