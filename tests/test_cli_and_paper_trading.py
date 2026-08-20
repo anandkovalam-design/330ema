@@ -78,3 +78,10 @@ def test_nifty_paper_order_rejects_wrong_quantity() -> None:
 
 def test_build_kite_login_url() -> None:
     assert build_kite_login_url("abc123") == "https://kite.zerodha.com/connect/login?api_key=abc123&v=3"
+
+
+def test_build_kite_login_url_with_redirect_params() -> None:
+    assert build_kite_login_url("abc123", {"dashboard_handoff": "one time"}) == (
+        "https://kite.zerodha.com/connect/login?api_key=abc123&v=3"
+        "&redirect_params=dashboard_handoff%3Done%2520time"
+    )

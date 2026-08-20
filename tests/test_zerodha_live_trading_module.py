@@ -19,6 +19,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _compute_heikin_ashi,
     _compute_signals,
     _complete_zerodha_login_callback,
+    _restore_dashboard_login_handoff,
     _credential_preview,
     _clear_login_credentials,
     _default_state_for,
@@ -919,6 +920,31 @@ def test_zerodha_callback_reports_failure_and_cleans_token(monkeypatch) -> None:
     assert query_params == {}
     assert session_state["connected"] is False
     assert session_state["zerodha_login_notice"].startswith("Zerodha authentication failed:")
+
+
+def test_zerodha_callback_restores_dashboard_login_handoff(monkeypatch) -> None:
+    session_state = {}
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            query_params={"dashboard_handoff": "one-time-id"},
+            session_state=session_state,
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_login_handoffs",
+        lambda: SimpleNamespace(consume=lambda handoff_id: "dashboard-token"),
+    )
+    monkeypatch.setattr(
+        app,
+        "_authentication",
+        lambda: SimpleNamespace(validate_session=lambda token, touch: {"role": "OWNER"}),
+    )
+
+    assert _restore_dashboard_login_handoff() is True
+    assert session_state["dashboard_session_token"] == "dashboard-token"
 
 
 def test_risk_settings_persist_for_both_underlyings(monkeypatch, tmp_path) -> None:

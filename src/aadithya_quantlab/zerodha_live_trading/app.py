@@ -21,6 +21,7 @@ from aadithya_quantlab.zerodha_live_trading.auth import (
     resolve_client_context,
 )
 from aadithya_quantlab.zerodha_live_trading.database import Database
+from aadithya_quantlab.zerodha_live_trading.login_handoff import LoginHandoffStore
 from aadithya_quantlab.zerodha_live_trading.persistence import (
     acknowledge_hard_stop_requests,
     load_daily_connection,
@@ -55,6 +56,7 @@ STRATEGY_HEIKIN_ASHI = "HEIKIN_ASHI_REVERSAL"
 HEIKIN_ASHI_PROFIT_GATE_POINTS = 10.0
 HEIKIN_ASHI_STOP_POINTS = 20.0
 DEFAULT_INDEX_EXPIRY_MODE = "Current week"
+DASHBOARD_HANDOFF_PARAM = "dashboard_handoff"
 
 
 @st.cache_resource
@@ -65,6 +67,11 @@ def _database() -> Database:
 @st.cache_resource
 def _authentication() -> AuthenticationService:
     return AuthenticationService(_database())
+
+
+@st.cache_resource
+def _login_handoffs() -> LoginHandoffStore:
+    return LoginHandoffStore()
 
 
 @dataclass(frozen=True)
@@ -591,6 +598,17 @@ def _complete_zerodha_login_callback() -> bool:
         return False
     finally:
         st.query_params.clear()
+
+
+def _restore_dashboard_login_handoff() -> bool:
+    handoff_id = str(st.query_params.get(DASHBOARD_HANDOFF_PARAM, "")).strip()
+    if not handoff_id:
+        return False
+    dashboard_token = _login_handoffs().consume(handoff_id)
+    if not dashboard_token or not _authentication().validate_session(dashboard_token, touch=False):
+        return False
+    st.session_state["dashboard_session_token"] = dashboard_token
+    return True
 
 
 def _render_same_tab_zerodha_login(url: str) -> None:
@@ -1984,22 +2002,22 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
         if isinstance(bars, pd.DataFrame) and not bars.empty:
             session_date = pd.Timestamp(bars["timestamp"].iloc[-1]).strftime("%d %b %Y")
             latest = bars.iloc[-1]
-            if name in COMMODITY_NAMES:
-                quote_left, quote_right = st.columns(2)
-                with quote_left:
-                    st.metric(
-                        "Live futures LTP",
-                        f"{_to_float(engine.get('live_signal_ltp')):.2f}",
-                    )
-                    live_signal_time = engine.get("live_signal_time")
-                    if live_signal_time:
-                        st.caption(f"Quote updated {_format_ist_timestamp(live_signal_time)}")
-                with quote_right:
-                    st.metric("Last 5-minute candle", f"{_to_float(latest.get('close')):.2f}")
-                    st.caption(f"Candle time {_format_ist_timestamp(latest.get('timestamp'))}")
-                live_signal_error = str(engine.get("live_signal_error", "")).strip()
-                if live_signal_error:
-                    st.warning(f"Live futures quote unavailable: {live_signal_error}")
+            quote_left, quote_right = st.columns(2)
+            quote_label = "Live futures LTP" if name in COMMODITY_NAMES else "Live spot LTP"
+            with quote_left:
+                st.metric(
+                    quote_label,
+                    f"{_to_float(engine.get('live_signal_ltp')):.2f}",
+                )
+                live_signal_time = engine.get("live_signal_time")
+                if live_signal_time:
+                    st.caption(f"Quote updated {_format_ist_timestamp(live_signal_time)}")
+            with quote_right:
+                st.metric("Last 5-minute candle", f"{_to_float(latest.get('close')):.2f}")
+                st.caption(f"Candle time {_format_ist_timestamp(latest.get('timestamp'))}")
+            live_signal_error = str(engine.get("live_signal_error", "")).strip()
+            if live_signal_error:
+                st.warning(f"Live quote unavailable: {live_signal_error}")
             st.caption(f"{session_date} candlesticks | EMA 3 yellow | EMA 30 blue")
             st.altair_chart(_build_price_chart(bars, name), width="stretch")
             ema_fast = _to_float(latest.get("ema_fast"), 0.0)
@@ -2040,6 +2058,12 @@ def _render_underlying_card(name: str, engine: dict[str, Any]) -> None:
                     st.metric("HA close", f"{_to_float(latest_ha.get('ha_close')):.2f}")
 
 
+@st.fragment(run_every=1)
+def _render_live_clock() -> None:
+    now_str = datetime.now(IST).strftime("%d %b %Y, %I:%M:%S %p IST")
+    st.caption(f":material/schedule: {now_str}")
+
+
 @st.fragment(run_every=5)
 def _render_live_engine(
     trade_mode: str,
@@ -2052,11 +2076,15 @@ def _render_live_engine(
     if not _authentication().validate_session(token, touch=True):
         st.session_state.pop("dashboard_session_token", None)
         st.rerun(scope="app")
+    refresh_started_at = datetime.now(IST)
     with st.container(border=True):
         st.subheader(":material/monitoring: Live market and trade engine")
         st.caption(
             f"Entry window: {ENTRY_START_IST}-{ENTRY_CUTOFF_IST} IST (15:00 inclusive) · "
             f"mandatory exit: {MANDATORY_EXIT_IST} IST. MCX entries: 09:00-22:30 IST · mandatory exit: 22:50 IST."
+        )
+        st.caption(
+            f":material/sync: Engine refreshed {refresh_started_at.strftime('%I:%M:%S %p IST')}"
         )
 
         if st.session_state.connected:
@@ -2607,6 +2635,7 @@ def _render_settings_page(session: dict[str, object]) -> None:
 def main() -> None:
     st.set_page_config(page_title="Zerodha live trade control", page_icon=":material/monitoring:", layout="wide")
     _apply_visual_style()
+    _restore_dashboard_login_handoff()
     session = _require_dashboard_login()
     _init_session_state()
     _complete_zerodha_login_callback()
@@ -2657,8 +2686,7 @@ def main() -> None:
                 else "MCX commodity live charts, positions, and execution events."
             )
         with live_right:
-            now_str = datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST")
-            st.caption(f":material/schedule: {now_str}")
+            _render_live_clock()
 
         trade_mode = str(st.session_state.get("trade_execution_mode", "PAPER"))
         real_mode_armed = bool(st.session_state.get("real_mode_armed", False))
@@ -2707,8 +2735,7 @@ def main() -> None:
     with h1:
         st.caption("Connection, execution, expiry, position sizing, and risk settings.")
     with h2:
-        now_str = datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST")
-        st.caption(f":material/schedule: {now_str}")
+        _render_live_clock()
 
     with st.container(border=True):
         st.subheader(":material/vpn_key: API login and connection")
@@ -2745,8 +2772,14 @@ def main() -> None:
                 st.info(
                     f"API credentials configured: {_credential_preview(saved_credentials['api_key'])}."
                 )
+                handoff_id = _login_handoffs().create(
+                    str(st.session_state["dashboard_session_token"])
+                )
                 _render_same_tab_zerodha_login(
-                    build_kite_login_url(saved_credentials["api_key"])
+                    build_kite_login_url(
+                        saved_credentials["api_key"],
+                        {DASHBOARD_HANDOFF_PARAM: handoff_id},
+                    )
                 )
                 st.caption(
                     "Complete Zerodha login and 2FA. You will return here already connected."

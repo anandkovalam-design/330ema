@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Mapping
+from urllib.parse import quote
 
 from aadithya_quantlab.trading.paper import PaperOrder
 
@@ -33,10 +35,20 @@ def load_zerodha_config_from_env() -> ZerodhaConfig:
     return ZerodhaConfig(api_key=api_key, access_token=access_token)
 
 
-def build_kite_login_url(api_key: str) -> str:
+def build_kite_login_url(
+    api_key: str,
+    redirect_params: Mapping[str, str] | None = None,
+) -> str:
     """Build the Kite Connect login URL."""
 
-    return f"https://kite.zerodha.com/connect/login?api_key={api_key}&v=3"
+    url = f"https://kite.zerodha.com/connect/login?api_key={api_key}&v=3"
+    if redirect_params:
+        encoded_params = "&".join(
+            f"{quote(str(key), safe='')}={quote(str(value), safe='')}"
+            for key, value in redirect_params.items()
+        )
+        url += f"&redirect_params={quote(encoded_params, safe='')}"
+    return url
 
 
 def build_nifty_option_paper_order(
