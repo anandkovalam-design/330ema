@@ -935,6 +935,17 @@ def _select_option_contract(
     return f"{cfg.option_exchange}:{symbol}"
 
 
+def _validate_option_contract_underlying(cfg: UnderlyingConfig, instrument: str) -> None:
+    exchange, symbol = _split_instrument(instrument)
+    prefix = cfg.option_symbol_prefix.upper()
+    normalized_symbol = symbol.upper()
+    suffix = normalized_symbol[len(prefix) :] if normalized_symbol.startswith(prefix) else ""
+    if exchange.upper() != cfg.option_exchange or not suffix or not suffix[0].isdigit():
+        raise ValueError(
+            f"Rejected {instrument}: contract does not belong to the {cfg.name} engine."
+        )
+
+
 def _contract_lot_size(instrument: str, instrument_rows: list[dict[str, Any]]) -> int:
     _, symbol = _split_instrument(instrument)
     for row in instrument_rows:
@@ -1770,6 +1781,7 @@ def _run_engine_for(
         expiry_week_offset=expiry_week_offset,
         instrument_rows=instrument_rows,
     )
+    _validate_option_contract_underlying(cfg, instrument)
     entry_option = _extract_ltp(kite, instrument)
     sl_points = (
         HEIKIN_ASHI_STOP_POINTS

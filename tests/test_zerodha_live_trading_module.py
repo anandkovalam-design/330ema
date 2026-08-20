@@ -2,6 +2,7 @@ import inspect
 import json
 
 import pandas as pd
+import pytest
 from datetime import datetime, time as wall_time, timedelta, timezone
 from types import SimpleNamespace
 
@@ -48,6 +49,7 @@ from aadithya_quantlab.zerodha_live_trading.app import (
     _sync_scaled_metal_risk_settings,
     _run_engine_for,
     _select_option_contract,
+    _validate_option_contract_underlying,
     _save_login_credentials,
     _save_risk_settings,
     _safe_trade_frame,
@@ -265,6 +267,46 @@ def test_mcx_front_future_and_atm_option_are_resolved_dynamically() -> None:
         object(), cfg, "CALL", 6170.0, expiry_week_offset=1, instrument_rows=rows
     )
     assert next_instrument == "MCX:CRUDEOIL6200NEXTCE"
+
+
+def test_gold_engine_rejects_silver_option_contract() -> None:
+    with pytest.raises(ValueError, match="does not belong to the GOLD engine"):
+        _validate_option_contract_underlying(
+            UNDERLYINGS["GOLD"],
+            "MCX:SILVER26AUG239000CE",
+        )
+
+
+def test_mixed_gold_silver_chain_selects_matching_underlying() -> None:
+    expiry = (pd.Timestamp.now(tz="Asia/Kolkata") + timedelta(days=10)).date()
+    rows = [
+        {
+            "name": "SILVER",
+            "tradingsymbol": "SILVER26AUG239000CE",
+            "instrument_type": "CE",
+            "expiry": expiry,
+            "strike": 239000,
+            "lot_size": 1,
+        },
+        {
+            "name": "GOLD",
+            "tradingsymbol": "GOLD26AUG125000CE",
+            "instrument_type": "CE",
+            "expiry": expiry,
+            "strike": 125000,
+            "lot_size": 1,
+        },
+    ]
+
+    instrument = _select_option_contract(
+        object(),
+        UNDERLYINGS["GOLD"],
+        "CALL",
+        125100.0,
+        instrument_rows=rows,
+    )
+
+    assert instrument == "MCX:GOLD26AUG125000CE"
 
 
 def test_commodity_live_signal_quote_refreshes_from_front_future(monkeypatch) -> None:
