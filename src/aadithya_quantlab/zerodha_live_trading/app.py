@@ -1266,6 +1266,45 @@ def _has_unverified_broker_activity(state: dict[str, Any]) -> bool:
     )
 
 
+def _rollover_engine_state_for_new_session(
+    engine_state: dict[str, dict[str, Any]],
+    previous_session_date: str,
+    current_session_date: str,
+) -> bool:
+    if not current_session_date or previous_session_date == current_session_date:
+        return False
+
+    for state in engine_state.values():
+        preserve_real_recovery = _has_unverified_broker_activity(state)
+        state.update(
+            {
+                "last_signal_ts": None,
+                "open_trade": state.get("open_trade") if preserve_real_recovery else None,
+                "realized_pnl": 0.0,
+                "events": [],
+                "order_logs": list(state.get("order_logs", [])) if preserve_real_recovery else [],
+                "trades_taken": 0,
+                "entry_status": "Waiting for market data",
+                "ha_last_signal_ts": None,
+                "ha_open_trade": None,
+                "ha_realized_pnl": 0.0,
+                "ha_events": [],
+                "ha_order_logs": [],
+                "ha_trades_taken": 0,
+                "ha_entry_status": "Waiting for Heikin-Ashi data",
+            }
+        )
+        if preserve_real_recovery:
+            state["reconciliation_required"] = True
+            state["reconciliation_status"] = "REQUIRED_AFTER_DAILY_ROLLOVER"
+            state["enabled"] = False
+            state["entry_status"] = "Previous-day REAL activity; broker reconciliation required"
+        else:
+            state["reconciliation_required"] = False
+            state["reconciliation_status"] = "NOT_REQUIRED"
+    return True
+
+
 def _restore_persistent_engine_state() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     persisted, metadata = load_engine_state(TRADING_STATE_PATH)
     restored = {name: _default_state_for(cfg) for name, cfg in UNDERLYINGS.items()}
@@ -1278,6 +1317,11 @@ def _restore_persistent_engine_state() -> tuple[dict[str, dict[str, Any]], dict[
             restored[name]["reconciliation_status"] = "REQUIRED_AFTER_RESTART"
             restored[name]["enabled"] = False
             restored[name]["entry_status"] = "Recovered state; broker reconciliation required"
+    _rollover_engine_state_for_new_session(
+        restored,
+        str(metadata.get("daily_counters_date", "")),
+        _today_ist_iso(),
+    )
     return restored, metadata
 
 
@@ -2076,6 +2120,14 @@ def _render_live_engine(
     if not _authentication().validate_session(token, touch=True):
         st.session_state.pop("dashboard_session_token", None)
         st.rerun(scope="app")
+    current_session_date = _today_ist_iso()
+    if _rollover_engine_state_for_new_session(
+        st.session_state.engine_state,
+        str(st.session_state.get("engine_session_date", "")),
+        current_session_date,
+    ):
+        st.session_state.engine_session_date = current_session_date
+        _persist_engine_state(st.session_state.engine_state)
     refresh_started_at = datetime.now(IST)
     with st.container(border=True):
         st.subheader(":material/monitoring: Live market and trade engine")
@@ -2238,11 +2290,14 @@ def _init_session_state() -> None:
         for name, settings in _load_risk_settings().items():
             st.session_state.engine_state[name].update(settings)
         st.session_state.recovery_metadata = recovery_metadata
+        st.session_state.engine_session_date = _today_ist_iso()
     else:
         for name, cfg in UNDERLYINGS.items():
             state = st.session_state.engine_state.setdefault(name, {})
             for key, value in _default_state_for(cfg).items():
                 state.setdefault(key, value)
+    if "engine_session_date" not in st.session_state:
+        st.session_state.engine_session_date = _today_ist_iso()
     if _migrate_natural_gas_risk_defaults(st.session_state.engine_state):
         _save_risk_settings(st.session_state.engine_state)
     if _sync_scaled_metal_risk_settings(st.session_state.engine_state):

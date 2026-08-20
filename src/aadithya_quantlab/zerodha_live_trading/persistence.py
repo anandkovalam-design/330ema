@@ -129,6 +129,7 @@ def save_engine_state(
         {
             "schema_version": STATE_SCHEMA_VERSION,
             "session_date": session_date,
+            "daily_counters_date": session_date,
             "saved_at": saved_at.isoformat(),
             "underlyings": underlyings,
         },
@@ -154,6 +155,7 @@ def load_engine_state(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, 
     }
     metadata = {
         "session_date": str(payload.get("session_date", "")),
+        "daily_counters_date": str(payload.get("daily_counters_date", "")),
         "saved_at": str(payload.get("saved_at", "")),
     }
     return underlyings, metadata

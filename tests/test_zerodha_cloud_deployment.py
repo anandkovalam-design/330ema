@@ -85,6 +85,84 @@ def test_recovered_real_activity_requires_reconciliation(monkeypatch, tmp_path: 
     assert restored["NIFTY"]["enabled"] is False
 
 
+def test_previous_day_paper_state_resets_daily_counters(monkeypatch, tmp_path: Path) -> None:
+    state_path = tmp_path / "engine-state.json"
+    state = {
+        name: app._default_state_for(config)
+        for name, config in app.UNDERLYINGS.items()
+    }
+    state["NIFTY"].update(
+        {
+            "trades_taken": 3,
+            "ha_trades_taken": 4,
+            "realized_pnl": 125.0,
+            "ha_realized_pnl": 50.0,
+            "last_signal_ts": "2026-08-19T14:00:00+05:30",
+            "open_trade": {"trade_mode": "PAPER", "instrument": "NFO:NIFTYTESTCE"},
+            "lots": 4,
+            "max_trades": 5,
+        }
+    )
+    save_engine_state(
+        state_path,
+        session_date="2026-08-19",
+        engine_state=state,
+        saved_at=datetime.fromisoformat("2026-08-19T15:30:00+05:30"),
+    )
+    monkeypatch.setattr(app, "TRADING_STATE_PATH", state_path)
+    monkeypatch.setattr(app, "_today_ist_iso", lambda: "2026-08-20")
+
+    restored, _ = app._restore_persistent_engine_state()
+
+    assert restored["NIFTY"]["trades_taken"] == 0
+    assert restored["NIFTY"]["ha_trades_taken"] == 0
+    assert restored["NIFTY"]["realized_pnl"] == 0.0
+    assert restored["NIFTY"]["ha_realized_pnl"] == 0.0
+    assert restored["NIFTY"]["last_signal_ts"] is None
+    assert restored["NIFTY"]["open_trade"] is None
+    assert restored["NIFTY"]["lots"] == 4
+    assert restored["NIFTY"]["max_trades"] == 5
+
+
+def test_same_day_restore_keeps_daily_counters(monkeypatch, tmp_path: Path) -> None:
+    state_path = tmp_path / "engine-state.json"
+    state = {
+        name: app._default_state_for(config)
+        for name, config in app.UNDERLYINGS.items()
+    }
+    state["NIFTY"]["trades_taken"] = 2
+    state["NIFTY"]["ha_trades_taken"] = 3
+    save_engine_state(
+        state_path,
+        session_date="2026-08-20",
+        engine_state=state,
+        saved_at=datetime.fromisoformat("2026-08-20T10:00:00+05:30"),
+    )
+    monkeypatch.setattr(app, "TRADING_STATE_PATH", state_path)
+    monkeypatch.setattr(app, "_today_ist_iso", lambda: "2026-08-20")
+
+    restored, _ = app._restore_persistent_engine_state()
+
+    assert restored["NIFTY"]["trades_taken"] == 2
+    assert restored["NIFTY"]["ha_trades_taken"] == 3
+
+
+def test_missing_legacy_counter_date_triggers_one_time_reset() -> None:
+    state = {
+        "NIFTY": {
+            **app._default_state_for(app.UNDERLYINGS["NIFTY"]),
+            "trades_taken": 8,
+            "ha_trades_taken": 6,
+        }
+    }
+
+    changed = app._rollover_engine_state_for_new_session(state, "", "2026-08-20")
+
+    assert changed is True
+    assert state["NIFTY"]["trades_taken"] == 0
+    assert state["NIFTY"]["ha_trades_taken"] == 0
+
+
 def test_daily_token_envelope_is_date_scoped_and_does_not_store_secret(tmp_path: Path) -> None:
     token_path = tmp_path / "daily-token.json"
 
