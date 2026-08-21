@@ -1,0 +1,37 @@
+ANAND 3/30 EMA - ZERODHA REAL-TIME TRADING
+===========================================
+
+1. Open PowerShell and move to the project:
+
+   cd "D:\ANAND 330EMA UPDATED"
+
+2. On the first run only, create the local OWNER account through environment
+   variables (use your own username and a password of at least 12 characters):
+
+   $env:ZERODHA_OWNER_USERNAME="your-owner-name"
+   $env:ZERODHA_OWNER_PASSWORD="your-strong-password"
+
+   Do not save the real password in this file.
+
+3. Start the live dashboard:
+
+   $env:PYTHONPATH="src"
+   $env:ZERODHA_CLOUD_MODE="false"
+   py -m streamlit run src/aadithya_quantlab/zerodha_live_trading/app.py
+
+4. In the dashboard:
+
+   - Sign in as the OWNER.
+   - Enter the Zerodha API key, API secret, and today's request token.
+   - Press Connect.
+   - Keep PAPER selected first and verify the 3/30 EMA signals.
+   - For supervised real orders only, select REAL and tick
+     "I confirm REAL mode should place live orders".
+
+REAL mode places actual Zerodha market orders and can cause financial loss.
+Cloud deployments are intentionally PAPER-only. Recovered REAL positions must
+be reconciled with Zerodha before the engine can be armed again.
+
+If the dashboard still shows "Cloud safety mode is active", close the running
+Streamlit process and start it again with START_ANAND330_LIVE.bat. Environment
+changes do not affect a dashboard process that is already running.

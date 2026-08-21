@@ -16,6 +16,8 @@ class FakeKite:
         self._now = datetime(2026, 7, 14, 11, 0, tzinfo=IST)
 
     def instruments(self, exchange: str | None = None) -> list[dict[str, object]]:
+        future_expiry = date.today() + timedelta(days=30)
+        option_expiry = date.today() + timedelta(days=7)
         rows = [
             {
                 "tradingsymbol": "INDIAVIX",
@@ -29,14 +31,14 @@ class FakeKite:
                 "instrument_token": 7001,
                 "instrument_type": "FUT",
                 "segment": "NFO-FUT",
-                "expiry": date(2026, 7, 30),
+                "expiry": future_expiry,
             },
             {
                 "tradingsymbol": "NIFTY26JUL25000CE",
                 "instrument_token": 8001,
                 "instrument_type": "CE",
                 "segment": "NFO-OPT",
-                "expiry": date(2026, 7, 16),
+                "expiry": option_expiry,
                 "strike": 25000,
             },
             {
@@ -44,7 +46,7 @@ class FakeKite:
                 "instrument_token": 8002,
                 "instrument_type": "PE",
                 "segment": "NFO-OPT",
-                "expiry": date(2026, 7, 16),
+                "expiry": option_expiry,
                 "strike": 25000,
             },
         ]

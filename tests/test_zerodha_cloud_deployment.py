@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+from aadithya_quantlab.zerodha_live_trading import app
+from aadithya_quantlab.zerodha_live_trading.persistence import (
+    load_daily_connection,
+    load_engine_state,
+    save_daily_connection,
+    save_engine_state,
+)
+
+
+def test_cloud_credentials_use_environment_without_keyring(monkeypatch) -> None:
+    monkeypatch.setenv("ZERODHA_CLOUD_MODE", "true")
+    monkeypatch.setenv("ZERODHA_API_KEY", "cloud-api-key")
+    monkeypatch.setenv("ZERODHA_API_SECRET", "cloud-api-secret")
+    monkeypatch.setattr(
+        app,
+        "_credential_keyring",
+        lambda: (_ for _ in ()).throw(AssertionError("keyring must not be used")),
+    )
+
+    assert app._load_login_credentials() == {
+        "api_key": "cloud-api-key",
+        "api_secret": "cloud-api-secret",
+    }
+
+
+def test_cloud_runtime_blocks_real_order_permission_by_default(monkeypatch) -> None:
+    monkeypatch.setenv("ZERODHA_CLOUD_MODE", "true")
+    monkeypatch.delenv("ZERODHA_ALLOW_REAL_TRADING", raising=False)
+    engine = app._default_state_for(app.UNDERLYINGS["NIFTY"])
+
+    assert app._live_orders_permitted(engine, real_mode_armed=True) is False
+
+
+def test_cloud_runtime_allows_explicitly_enabled_armed_real_orders(monkeypatch) -> None:
+    monkeypatch.setenv("ZERODHA_CLOUD_MODE", "true")
+    monkeypatch.setenv("ZERODHA_ALLOW_REAL_TRADING", "true")
+    engine = app._default_state_for(app.UNDERLYINGS["NIFTY"])
+
+    assert app._live_orders_permitted(engine, real_mode_armed=True) is True
+    assert app._live_orders_permitted(engine, real_mode_armed=False) is False
+
+
+def test_cloud_runtime_reconciliation_still_blocks_enabled_real_orders(monkeypatch) -> None:
+    monkeypatch.setenv("ZERODHA_CLOUD_MODE", "true")
+    monkeypatch.setenv("ZERODHA_ALLOW_REAL_TRADING", "true")
+    engine = app._default_state_for(app.UNDERLYINGS["NIFTY"])
+    engine["reconciliation_required"] = True
+
+    assert app._live_orders_permitted(engine, real_mode_armed=True) is False
+
+
+def test_recovered_real_activity_requires_reconciliation(monkeypatch, tmp_path: Path) -> None:
+    state_path = tmp_path / "engine-state.json"
+    state = {
+        name: app._default_state_for(config)
+        for name, config in app.UNDERLYINGS.items()
+    }
+    state["NIFTY"]["enabled"] = True
+    state["NIFTY"]["open_trade"] = {
+        "instrument": "NFO:NIFTYTESTCE",
+        "quantity": 130,
+        "entry_order_id": "ORDER-123",
+        "trade_mode": "REAL",
+        "stop_price": 80.0,
+    }
+    save_engine_state(
+        state_path,
+        session_date="2026-08-13",
+        engine_state=state,
+        saved_at=datetime.fromisoformat("2026-08-13T10:00:00+05:30"),
+    )
+    monkeypatch.setattr(app, "TRADING_STATE_PATH", state_path)
+
+    restored, metadata = app._restore_persistent_engine_state()
+
+    assert metadata["session_date"] == "2026-08-13"
+    assert restored["NIFTY"]["open_trade"]["entry_order_id"] == "ORDER-123"
+    assert restored["NIFTY"]["reconciliation_required"] is True
+    assert restored["NIFTY"]["enabled"] is False
+
+
+def test_previous_day_paper_state_resets_daily_counters(monkeypatch, tmp_path: Path) -> None:
+    state_path = tmp_path / "engine-state.json"
+    state = {
+        name: app._default_state_for(config)
+        for name, config in app.UNDERLYINGS.items()
+    }
+    state["NIFTY"].update(
+        {
+            "trades_taken": 3,
+            "ha_trades_taken": 4,
+            "realized_pnl": 125.0,
+            "ha_realized_pnl": 50.0,
+            "last_signal_ts": "2026-08-19T14:00:00+05:30",
+            "open_trade": {"trade_mode": "PAPER", "instrument": "NFO:NIFTYTESTCE"},
+            "lots": 4,
+            "max_trades": 5,
+        }
+    )
+    save_engine_state(
+        state_path,
+        session_date="2026-08-19",
+        engine_state=state,
+        saved_at=datetime.fromisoformat("2026-08-19T15:30:00+05:30"),
+    )
+    monkeypatch.setattr(app, "TRADING_STATE_PATH", state_path)
+    monkeypatch.setattr(app, "_today_ist_iso", lambda: "2026-08-20")
+
+    restored, _ = app._restore_persistent_engine_state()
+
+    assert restored["NIFTY"]["trades_taken"] == 0
+    assert restored["NIFTY"]["ha_trades_taken"] == 0
+    assert restored["NIFTY"]["realized_pnl"] == 0.0
+    assert restored["NIFTY"]["ha_realized_pnl"] == 0.0
+    assert restored["NIFTY"]["last_signal_ts"] is None
+    assert restored["NIFTY"]["open_trade"] is None
+    assert restored["NIFTY"]["lots"] == 4
+    assert restored["NIFTY"]["max_trades"] == 5
+
+
+def test_same_day_restore_keeps_daily_counters(monkeypatch, tmp_path: Path) -> None:
+    state_path = tmp_path / "engine-state.json"
+    state = {
+        name: app._default_state_for(config)
+        for name, config in app.UNDERLYINGS.items()
+    }
+    state["NIFTY"]["trades_taken"] = 2
+    state["NIFTY"]["ha_trades_taken"] = 3
+    save_engine_state(
+        state_path,
+        session_date="2026-08-20",
+        engine_state=state,
+        saved_at=datetime.fromisoformat("2026-08-20T10:00:00+05:30"),
+    )
+    monkeypatch.setattr(app, "TRADING_STATE_PATH", state_path)
+    monkeypatch.setattr(app, "_today_ist_iso", lambda: "2026-08-20")
+
+    restored, _ = app._restore_persistent_engine_state()
+
+    assert restored["NIFTY"]["trades_taken"] == 2
+    assert restored["NIFTY"]["ha_trades_taken"] == 3
+
+
+def test_missing_legacy_counter_date_triggers_one_time_reset() -> None:
+    state = {
+        "NIFTY": {
+            **app._default_state_for(app.UNDERLYINGS["NIFTY"]),
+            "trades_taken": 8,
+            "ha_trades_taken": 6,
+        }
+    }
+
+    changed = app._rollover_engine_state_for_new_session(state, "", "2026-08-20")
+
+    assert changed is True
+    assert state["NIFTY"]["trades_taken"] == 0
+    assert state["NIFTY"]["ha_trades_taken"] == 0
+
+
+def test_daily_token_envelope_is_date_scoped_and_does_not_store_secret(tmp_path: Path) -> None:
+    token_path = tmp_path / "daily-token.json"
+
+    save_daily_connection(
+        token_path,
+        session_date="2026-08-13",
+        api_key=None,
+        access_token="daily-access-token",
+    )
+
+    payload = json.loads(token_path.read_text(encoding="utf-8"))
+    assert "api_secret" not in payload
+    assert load_daily_connection(token_path, session_date="2026-08-13") == {
+        "access_token": "daily-access-token"
+    }
+    assert load_daily_connection(token_path, session_date="2026-08-14") is None
+
+
+def test_engine_state_store_excludes_transient_market_frames(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    state = {
+        "NIFTY": {
+            "open_trade": {"entry_order_id": "PAPER", "stop_price": 95.0},
+            "last_signal_ts": "2026-08-13T09:30:00+05:30",
+            "trades_taken": 1,
+            "realized_pnl": 125.0,
+            "ha_open_trade": {"entry_order_id": "PAPER-HA", "stop_price": 80.0},
+            "ha_last_signal_ts": "2026-08-13T09:35:00+05:30",
+            "ha_trades_taken": 2,
+            "ha_realized_pnl": 50.0,
+            "latest_bars": "large-transient-frame",
+        }
+    }
+
+    save_engine_state(
+        state_path,
+        session_date="2026-08-13",
+        engine_state=state,
+        saved_at=datetime.fromisoformat("2026-08-13T10:00:00+05:30"),
+    )
+    restored, _ = load_engine_state(state_path)
+
+    assert restored["NIFTY"]["open_trade"]["entry_order_id"] == "PAPER"
+    assert restored["NIFTY"]["last_signal_ts"].startswith("2026-08-13")
+    assert restored["NIFTY"]["trades_taken"] == 1
+    assert restored["NIFTY"]["ha_open_trade"]["entry_order_id"] == "PAPER-HA"
+    assert restored["NIFTY"]["ha_trades_taken"] == 2
+    assert restored["NIFTY"]["ha_realized_pnl"] == 50.0
+    assert "latest_bars" not in restored["NIFTY"]
+
+
+class _ReconciliationKite:
+    def orders(self):
+        return [{"order_id": "ORDER-123", "status": "COMPLETE"}]
+
+    def positions(self):
+        return {
+            "net": [
+                {
+                    "exchange": "NFO",
+                    "tradingsymbol": "NIFTYTESTCE",
+                    "quantity": 130,
+                }
+            ]
+        }
+
+
+def test_broker_reconciliation_hook_clears_gate_on_exact_match() -> None:
+    engine_state = {
+        "NIFTY": {
+            "open_trade": {
+                "instrument": "NFO:NIFTYTESTCE",
+                "quantity": 130,
+                "trade_mode": "REAL",
+            },
+            "order_logs": [
+                {
+                    "instrument": "NFO:NIFTYTESTCE",
+                    "order_id": "ORDER-123",
+                }
+            ],
+            "reconciliation_required": True,
+        }
+    }
+
+    report = app._reconcile_engine_state_with_broker(_ReconciliationKite(), engine_state)
+
+    assert report["status"] == "MATCHED"
+    assert engine_state["NIFTY"]["reconciliation_required"] is False

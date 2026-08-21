@@ -1,0 +1,66 @@
+# Replace angle-bracket placeholders before applying this template.
+# The Key Vault secrets and the `zerodha-files` environment storage must already exist.
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    <USER_ASSIGNED_IDENTITY_RESOURCE_ID>: {}
+properties:
+  managedEnvironmentId: <MANAGED_ENVIRONMENT_RESOURCE_ID>
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      # Keep private until Microsoft Entra authentication is configured.
+      external: false
+      targetPort: 8501
+      transport: auto
+      allowInsecure: false
+    registries:
+      - server: <ACR_LOGIN_SERVER>
+        identity: <USER_ASSIGNED_IDENTITY_RESOURCE_ID>
+    secrets:
+      - name: zerodha-api-key
+        keyVaultUrl: https://<KEY_VAULT_NAME>.vault.azure.net/secrets/zerodha-api-key
+        identity: <USER_ASSIGNED_IDENTITY_RESOURCE_ID>
+      - name: zerodha-api-secret
+        keyVaultUrl: https://<KEY_VAULT_NAME>.vault.azure.net/secrets/zerodha-api-secret
+        identity: <USER_ASSIGNED_IDENTITY_RESOURCE_ID>
+      - name: zerodha-owner-username
+        keyVaultUrl: https://<KEY_VAULT_NAME>.vault.azure.net/secrets/zerodha-owner-username
+        identity: <USER_ASSIGNED_IDENTITY_RESOURCE_ID>
+      - name: zerodha-owner-password
+        keyVaultUrl: https://<KEY_VAULT_NAME>.vault.azure.net/secrets/zerodha-owner-password
+        identity: <USER_ASSIGNED_IDENTITY_RESOURCE_ID>
+  template:
+    containers:
+      - name: zerodha-dashboard
+        image: <ACR_LOGIN_SERVER>/zerodha-dashboard:<IMAGE_TAG>
+        resources:
+          cpu: 0.5
+          memory: 1Gi
+        env:
+          - name: ZERODHA_CLOUD_MODE
+            value: "true"
+          - name: ZERODHA_DATA_DIR
+            value: /mnt/zerodha
+          - name: ZERODHA_API_KEY
+            secretRef: zerodha-api-key
+          - name: ZERODHA_API_SECRET
+            secretRef: zerodha-api-secret
+          - name: ZERODHA_OWNER_USERNAME
+            secretRef: zerodha-owner-username
+          - name: ZERODHA_OWNER_PASSWORD
+            secretRef: zerodha-owner-password
+          - name: ZERODHA_TRUST_PROXY_HEADERS
+            value: "false"
+          - name: ZERODHA_ALLOW_REAL_TRADING
+            value: "false"
+        volumeMounts:
+          - volumeName: zerodha-data
+            mountPath: /mnt/zerodha
+    scale:
+      minReplicas: 1
+      maxReplicas: 1
+    volumes:
+      - name: zerodha-data
+        storageType: AzureFile
+        storageName: zerodha-files
